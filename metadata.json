@@ -1,0 +1,6 @@
+{
+  "name": "Verve",
+  "description": "A modern, responsive social network with real-time messaging, live notifications, rich profiles, and a clean light/dark interface.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
