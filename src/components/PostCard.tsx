@@ -1,6 +1,6 @@
 import {useState} from 'react';
 import type {FormEvent} from 'react';
-import {Bookmark, MessageCircle, Send, ThumbsUp, Trash2} from 'lucide-react';
+import {Bookmark, Check, MessageCircle, Send, Share2, ThumbsUp, Trash2} from 'lucide-react';
 import {apiRequest, formatRelativeTime} from '../lib/api';
 import type {CommentItem, PostItem, UserProfile} from '../types';
 import {Avatar, PostPhoto} from './MediaImage';
@@ -28,8 +28,17 @@ export function PostCard({
   const [commentText, setCommentText] = useState('');
   const [submittingComment, setSubmittingComment] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [copiedShare, setCopiedShare] = useState(false);
 
   const isOwner = post.user_id === currentUser.id;
+
+  function handleSharePost() {
+    const shareUrl = `${window.location.origin}/profile/${post.user_id}#post-${post.id}`;
+    navigator.clipboard?.writeText(shareUrl).then(() => {
+      setCopiedShare(true);
+      setTimeout(() => setCopiedShare(false), 2000);
+    });
+  }
 
   async function handleCommentSubmit(e: FormEvent) {
     e.preventDefault();
@@ -52,7 +61,10 @@ export function PostCard({
   }
 
   return (
-    <article className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl overflow-hidden">
+    <article
+      id={`post-${post.id}`}
+      className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
+    >
       {/* Header */}
       <div className="p-4 sm:px-5 sm:pt-4 sm:pb-3 flex items-start justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
@@ -144,17 +156,17 @@ export function PostCard({
 
       {/* Action buttons */}
       <div
-        className={`mx-4 sm:mx-5 border-t border-[#E4E6EB] dark:border-[#2E3035] py-1.5 grid ${
-          onToggleSave ? 'grid-cols-3' : 'grid-cols-2'
+        className={`mx-4 sm:mx-5 border-t border-[#E5E8EE] dark:border-[#252A34] py-1.5 grid ${
+          onToggleSave ? 'grid-cols-4' : 'grid-cols-3'
         } gap-1`}
       >
         <button
           type="button"
           onClick={() => onToggleLike(post.id)}
-          className={`h-10 rounded-xl flex items-center justify-center gap-2 text-sm font-semibold transition-colors cursor-pointer ${
+          className={`h-10 rounded-xl flex items-center justify-center gap-1.5 text-xs sm:text-sm font-semibold transition-colors cursor-pointer ${
             post.liked_by_me
               ? 'text-[#1877F2] dark:text-[#60A5FA] bg-[#1877F2]/8 dark:bg-[#3B82F6]/15'
-              : 'text-[#65676B] dark:text-[#9CA3AF] hover:bg-[#F0F2F5] dark:hover:bg-[#2A2D32]'
+              : 'text-[#64748B] dark:text-[#94A3B8] hover:bg-[#F4F6F9] dark:hover:bg-[#1E232D]'
           }`}
         >
           <ThumbsUp className={`w-4 h-4 ${post.liked_by_me ? 'fill-current' : ''}`} />
@@ -164,7 +176,7 @@ export function PostCard({
         <button
           type="button"
           onClick={() => setShowComments((prev) => !prev)}
-          className="h-10 rounded-xl flex items-center justify-center gap-2 text-sm font-semibold text-[#65676B] dark:text-[#9CA3AF] hover:bg-[#F0F2F5] dark:hover:bg-[#2A2D32] transition-colors cursor-pointer"
+          className="h-10 rounded-xl flex items-center justify-center gap-1.5 text-xs sm:text-sm font-semibold text-[#64748B] dark:text-[#94A3B8] hover:bg-[#F4F6F9] dark:hover:bg-[#1E232D] transition-colors cursor-pointer"
         >
           <MessageCircle className="w-4 h-4" />
           <span>Comment</span>
@@ -174,16 +186,29 @@ export function PostCard({
           <button
             type="button"
             onClick={() => onToggleSave(post.id)}
-            className={`h-10 rounded-xl flex items-center justify-center gap-2 text-sm font-semibold transition-colors cursor-pointer ${
+            className={`h-10 rounded-xl flex items-center justify-center gap-1.5 text-xs sm:text-sm font-semibold transition-colors cursor-pointer ${
               post.saved_by_me
                 ? 'text-[#7C3AED] dark:text-[#A78BFA] bg-[#7C3AED]/10 dark:bg-[#7C3AED]/15'
-                : 'text-[#65676B] dark:text-[#9CA3AF] hover:bg-[#F0F2F5] dark:hover:bg-[#2A2D32]'
+                : 'text-[#64748B] dark:text-[#94A3B8] hover:bg-[#F4F6F9] dark:hover:bg-[#1E232D]'
             }`}
           >
             <Bookmark className={`w-4 h-4 ${post.saved_by_me ? 'fill-current' : ''}`} />
             <span>{post.saved_by_me ? 'Saved' : 'Save'}</span>
           </button>
         )}
+
+        <button
+          type="button"
+          onClick={handleSharePost}
+          className={`h-10 rounded-xl flex items-center justify-center gap-1.5 text-xs sm:text-sm font-semibold transition-colors cursor-pointer ${
+            copiedShare
+              ? 'text-[#16A34A] dark:text-[#4ADE80] bg-[#ECFDF5] dark:bg-[#0B291E]'
+              : 'text-[#64748B] dark:text-[#94A3B8] hover:bg-[#F4F6F9] dark:hover:bg-[#1E232D]'
+          }`}
+        >
+          {copiedShare ? <Check className="w-4 h-4" /> : <Share2 className="w-4 h-4" />}
+          <span>{copiedShare ? 'Copied' : 'Share'}</span>
+        </button>
       </div>
 
       {/* Comments Section */}

@@ -37,17 +37,17 @@ export function RightRailPanel({
   const unreadNotifCount = notifications.filter((n) => !n.read).length;
 
   return (
-    <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl overflow-hidden flex flex-col max-h-[calc(100vh-6rem)]">
+    <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl overflow-hidden flex flex-col max-h-[calc(100vh-6rem)]">
       {/* Switcher */}
-      <div className="p-3 border-b border-[#E4E6EB] dark:border-[#2E3035]">
-        <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-[#F0F2F5] dark:bg-[#121316]">
+      <div className="p-3 border-b border-[#E5E8EE] dark:border-[#252A34]">
+        <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-[#F4F6F9] dark:bg-[#0E1014]">
           <button
             type="button"
             onClick={() => setPanelTab('chats')}
             className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
               panelTab === 'chats'
-                ? 'bg-white dark:bg-[#2A2D32] text-[#111827] dark:text-white shadow-xs'
-                : 'text-[#65676B] dark:text-[#9CA3AF] hover:text-[#111827] dark:hover:text-white'
+                ? 'bg-white dark:bg-[#232732] text-[#0F172A] dark:text-white shadow-xs'
+                : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F172A] dark:hover:text-white'
             }`}
           >
             Chats
@@ -57,8 +57,8 @@ export function RightRailPanel({
             onClick={() => setPanelTab('notifications')}
             className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
               panelTab === 'notifications'
-                ? 'bg-white dark:bg-[#2A2D32] text-[#111827] dark:text-white shadow-xs'
-                : 'text-[#65676B] dark:text-[#9CA3AF] hover:text-[#111827] dark:hover:text-white'
+                ? 'bg-white dark:bg-[#232732] text-[#0F172A] dark:text-white shadow-xs'
+                : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F172A] dark:hover:text-white'
             }`}
           >
             Alerts{unreadNotifCount > 0 ? ` (${unreadNotifCount})` : ''}
@@ -68,9 +68,9 @@ export function RightRailPanel({
 
       {/* Chats list */}
       {panelTab === 'chats' && (
-        <div className="overflow-y-auto divide-y divide-[#E4E6EB] dark:divide-[#2E3035]">
+        <div className="overflow-y-auto divide-y divide-[#E5E8EE] dark:divide-[#252A34]">
           {conversations.length === 0 ? (
-            <div className="p-6 text-center text-xs text-[#65676B] dark:text-[#9CA3AF]">
+            <div className="p-6 text-center text-xs text-[#64748B] dark:text-[#94A3B8]">
               No contacts available yet.
             </div>
           ) : (
@@ -79,7 +79,7 @@ export function RightRailPanel({
                 key={conv.user.id}
                 type="button"
                 onClick={() => onSelectChat(conv.user)}
-                className="w-full px-3.5 py-3 flex items-center gap-3 hover:bg-[#F0F2F5] dark:hover:bg-[#24262B] transition-colors text-left cursor-pointer"
+                className="w-full px-3.5 py-3 flex items-center gap-3 hover:bg-[#F8FAFC] dark:hover:bg-[#1E222B] transition-colors text-left cursor-pointer"
               >
                 <Avatar
                   src={conv.user.avatar_url}
@@ -89,17 +89,17 @@ export function RightRailPanel({
                 />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-semibold text-[#111827] dark:text-[#F3F4F6] truncate">
+                    <span className="text-sm font-semibold text-[#0F172A] dark:text-[#F1F5F9] truncate">
                       {conv.user.name}
                     </span>
                     {conv.last_message_at && (
-                      <span className="text-[11px] text-[#65676B] dark:text-[#9CA3AF] tabular-nums shrink-0">
+                      <span className="text-[11px] text-[#64748B] dark:text-[#94A3B8] tabular-nums shrink-0">
                         {formatRelativeTime(conv.last_message_at)}
                       </span>
                     )}
                   </div>
                   <div className="flex items-center justify-between gap-2 mt-0.5">
-                    <p className="text-xs text-[#65676B] dark:text-[#9CA3AF] truncate">
+                    <p className="text-xs text-[#64748B] dark:text-[#94A3B8] truncate">
                       {conv.last_message || 'Start a conversation'}
                     </p>
                     {conv.unread_count > 0 && (
@@ -119,8 +119,8 @@ export function RightRailPanel({
       {panelTab === 'notifications' && (
         <div className="flex flex-col min-h-0 flex-1">
           {unreadNotifCount > 0 && (
-            <div className="px-3.5 py-2 border-b border-[#E4E6EB] dark:border-[#2E3035] flex items-center justify-between">
-              <span className="text-xs text-[#65676B] dark:text-[#9CA3AF] tabular-nums">
+            <div className="px-3.5 py-2 border-b border-[#E5E8EE] dark:border-[#252A34] flex items-center justify-between">
+              <span className="text-xs text-[#64748B] dark:text-[#94A3B8] tabular-nums">
                 {unreadNotifCount} unread
               </span>
               <button
@@ -134,9 +134,9 @@ export function RightRailPanel({
             </div>
           )}
 
-          <div className="overflow-y-auto divide-y divide-[#E4E6EB] dark:divide-[#2E3035]">
+          <div className="overflow-y-auto divide-y divide-[#E5E8EE] dark:divide-[#252A34]">
             {notifications.length === 0 ? (
-              <div className="p-6 text-center text-xs text-[#65676B] dark:text-[#9CA3AF]">
+              <div className="p-6 text-center text-xs text-[#64748B] dark:text-[#94A3B8]">
                 You are all caught up.
               </div>
             ) : (
@@ -145,7 +145,7 @@ export function RightRailPanel({
                   key={notif.id}
                   type="button"
                   onClick={() => onNotificationClick(notif)}
-                  className={`w-full px-3.5 py-3 flex items-start gap-2.5 text-left hover:bg-[#F0F2F5] dark:hover:bg-[#24262B] transition-colors cursor-pointer ${
+                  className={`w-full px-3.5 py-3 flex items-start gap-2.5 text-left hover:bg-[#F8FAFC] dark:hover:bg-[#1E222B] transition-colors cursor-pointer ${
                     !notif.read ? 'bg-[#1877F2]/5 dark:bg-[#3B82F6]/10' : ''
                   }`}
                 >
@@ -157,10 +157,10 @@ export function RightRailPanel({
                     </div>
                   )}
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs text-[#111827] dark:text-[#E5E7EB] leading-snug">
+                    <p className="text-xs text-[#0F172A] dark:text-[#E2E8F0] leading-snug">
                       {notif.message}
                     </p>
-                    <span className="text-[11px] text-[#65676B] dark:text-[#9CA3AF] mt-1 block tabular-nums">
+                    <span className="text-[11px] text-[#64748B] dark:text-[#94A3B8] mt-1 block tabular-nums">
                       {formatRelativeTime(notif.created_at)}
                     </span>
                   </div>
@@ -233,12 +233,14 @@ export function ChatConversationWindow({
 
   return (
     <div
-      className={`bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] flex flex-col overflow-hidden ${
-        compact ? 'w-[340px] h-[440px] rounded-t-2xl shadow-lg' : 'h-[620px] rounded-2xl'
+      className={`bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] flex flex-col overflow-hidden ${
+        compact
+          ? 'w-[340px] h-[440px] rounded-t-2xl shadow-xl shadow-slate-900/10 dark:shadow-black/40'
+          : 'h-[620px] rounded-2xl shadow-[0_1px_2px_rgba(15,23,42,0.04)]'
       }`}
     >
       {/* Header */}
-      <div className="px-4 py-3 border-b border-[#E4E6EB] dark:border-[#2E3035] flex items-center justify-between gap-2 shrink-0">
+      <div className="px-4 py-3 border-b border-[#E5E8EE] dark:border-[#252A34] flex items-center justify-between gap-2 shrink-0">
         <button
           type="button"
           onClick={() => onOpenProfile(peer.id)}
@@ -246,10 +248,10 @@ export function ChatConversationWindow({
         >
           <Avatar src={peer.avatar_url} name={peer.name} size="sm" online={isPeerOnline} />
           <div className="min-w-0">
-            <span className="font-display font-semibold text-sm text-[#111827] dark:text-white truncate block hover:underline">
+            <span className="font-display font-semibold text-sm text-[#0F172A] dark:text-white truncate block hover:underline">
               {peer.name}
             </span>
-            <span className="text-[11px] text-[#65676B] dark:text-[#9CA3AF] block">
+            <span className="text-[11px] text-[#64748B] dark:text-[#94A3B8] block">
               {isPeerTyping ? 'Typing...' : isPeerOnline ? 'Active now' : 'Offline'}
             </span>
           </div>
@@ -260,7 +262,7 @@ export function ChatConversationWindow({
             type="button"
             onClick={onClose}
             aria-label="Close chat"
-            className="p-1.5 rounded-lg text-[#65676B] dark:text-[#9CA3AF] hover:bg-[#F0F2F5] dark:hover:bg-[#2A2D32] cursor-pointer"
+            className="p-1.5 rounded-lg text-[#64748B] dark:text-[#94A3B8] hover:bg-[#F4F6F9] dark:hover:bg-[#232732] cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -268,14 +270,14 @@ export function ChatConversationWindow({
       </div>
 
       {/* Messages body */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-2.5 bg-[#F8F9FA] dark:bg-[#141619]">
+      <div className="flex-1 overflow-y-auto p-4 space-y-2.5 bg-[#F8FAFC] dark:bg-[#101318]">
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-6">
             <Avatar src={peer.avatar_url} name={peer.name} size="lg" />
-            <p className="font-display font-semibold text-sm text-[#111827] dark:text-white mt-3">
+            <p className="font-display font-semibold text-sm text-[#0F172A] dark:text-white mt-3">
               {peer.name}
             </p>
-            <p className="text-xs text-[#65676B] dark:text-[#9CA3AF] mt-1">
+            <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1">
               Say hello to start a real-time conversation.
             </p>
           </div>
@@ -288,12 +290,12 @@ export function ChatConversationWindow({
                   className={`max-w-[80%] px-3.5 py-2 rounded-2xl text-sm leading-relaxed break-words ${
                     mine
                       ? 'bg-[#1877F2] dark:bg-[#2563EB] text-white rounded-br-sm'
-                      : 'bg-white dark:bg-[#24262B] border border-[#E4E6EB] dark:border-[#2E3035] text-[#111827] dark:text-[#F3F4F6] rounded-bl-sm'
+                      : 'bg-white dark:bg-[#1E222B] border border-[#E5E8EE] dark:border-[#252A34] text-[#0F172A] dark:text-[#F1F5F9] rounded-bl-sm'
                   }`}
                 >
                   {m.content}
                 </div>
-                <span className="text-[10px] text-[#65676B] dark:text-[#9CA3AF] mt-1 px-1 tabular-nums">
+                <span className="text-[10px] text-[#64748B] dark:text-[#94A3B8] mt-1 px-1 tabular-nums">
                   {formatRelativeTime(m.created_at)}
                 </span>
               </div>
@@ -303,7 +305,7 @@ export function ChatConversationWindow({
 
         {isPeerTyping && (
           <div className="flex items-start">
-            <div className="px-3.5 py-2 rounded-2xl bg-white dark:bg-[#24262B] border border-[#E4E6EB] dark:border-[#2E3035] text-xs text-[#65676B] dark:text-[#9CA3AF]">
+            <div className="px-3.5 py-2 rounded-2xl bg-white dark:bg-[#1E222B] border border-[#E5E8EE] dark:border-[#252A34] text-xs text-[#64748B] dark:text-[#94A3B8]">
               {peer.name.split(' ')[0]} is typing...
             </div>
           </div>
@@ -314,20 +316,20 @@ export function ChatConversationWindow({
       {/* Input */}
       <form
         onSubmit={handleSubmit}
-        className="p-3 border-t border-[#E4E6EB] dark:border-[#2E3035] bg-white dark:bg-[#1C1E21] flex items-center gap-2 shrink-0"
+        className="p-3 border-t border-[#E5E8EE] dark:border-[#252A34] bg-white dark:bg-[#16191F] flex items-center gap-2 shrink-0"
       >
         <input
           type="text"
           value={draft}
           onChange={(e) => handleDraftChange(e.target.value)}
           placeholder="Type a message..."
-          className="flex-1 h-10 px-3.5 rounded-xl bg-[#F0F2F5] dark:bg-[#121316] text-sm text-[#111827] dark:text-white placeholder:text-[#65676B] dark:placeholder:text-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#1877F2]"
+          className="flex-1 h-10 px-3.5 rounded-xl bg-[#F4F6F9] dark:bg-[#0E1014] border border-transparent focus:border-[#1877F2]/40 text-sm text-[#0F172A] dark:text-white placeholder:text-[#64748B] dark:placeholder:text-[#94A3B8] focus:outline-none focus:ring-2 focus:ring-[#1877F2]/30"
         />
         <button
           type="submit"
           disabled={!draft.trim() || sending}
           aria-label="Send message"
-          className="w-10 h-10 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] dark:bg-[#2563EB] text-white flex items-center justify-center disabled:opacity-45 transition-colors shrink-0 cursor-pointer"
+          className="w-10 h-10 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] dark:bg-[#2563EB] text-white flex items-center justify-center disabled:opacity-45 active:scale-[0.97] transition-all shrink-0 cursor-pointer"
         >
           <Send className="w-4 h-4" />
         </button>
@@ -367,19 +369,19 @@ export function MessagesPage({
   return (
     <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-start">
       {/* Contacts Column */}
-      <div className="md:col-span-5 bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl overflow-hidden">
-        <div className="px-4 py-3.5 border-b border-[#E4E6EB] dark:border-[#2E3035]">
-          <h1 className="text-lg font-display font-bold text-[#111827] dark:text-white">
+      <div className="md:col-span-5 bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl overflow-hidden">
+        <div className="px-4 py-3.5 border-b border-[#E5E8EE] dark:border-[#252A34]">
+          <h1 className="text-lg font-display font-bold text-[#0F172A] dark:text-white">
             Messages
           </h1>
-          <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
+          <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
             Real-time conversations with friends and community members
           </p>
         </div>
 
-        <div className="divide-y divide-[#E4E6EB] dark:divide-[#2E3035] max-h-[540px] overflow-y-auto">
+        <div className="divide-y divide-[#E5E8EE] dark:divide-[#252A34] max-h-[540px] overflow-y-auto">
           {conversations.length === 0 ? (
-            <div className="p-6 text-center text-sm text-[#65676B] dark:text-[#9CA3AF]">
+            <div className="p-6 text-center text-sm text-[#64748B] dark:text-[#94A3B8]">
               No conversations yet.
             </div>
           ) : (
@@ -393,7 +395,7 @@ export function MessagesPage({
                   className={`w-full px-4 py-3.5 flex items-center gap-3 text-left transition-colors cursor-pointer ${
                     isActive
                       ? 'bg-[#1877F2]/8 dark:bg-[#3B82F6]/15'
-                      : 'hover:bg-[#F0F2F5] dark:hover:bg-[#24262B]'
+                      : 'hover:bg-[#F8FAFC] dark:hover:bg-[#1E222B]'
                   }`}
                 >
                   <Avatar
@@ -404,16 +406,16 @@ export function MessagesPage({
                   />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-semibold text-[#111827] dark:text-white truncate">
+                      <span className="text-sm font-semibold text-[#0F172A] dark:text-white truncate">
                         {conv.user.name}
                       </span>
                       {conv.last_message_at && (
-                        <span className="text-[11px] text-[#65676B] dark:text-[#9CA3AF] tabular-nums">
+                        <span className="text-[11px] text-[#64748B] dark:text-[#94A3B8] tabular-nums">
                           {formatRelativeTime(conv.last_message_at)}
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-[#65676B] dark:text-[#9CA3AF] truncate mt-0.5">
+                    <p className="text-xs text-[#64748B] dark:text-[#94A3B8] truncate mt-0.5">
                       {conv.last_message || 'Start chatting'}
                     </p>
                   </div>
@@ -438,9 +440,9 @@ export function MessagesPage({
             onOpenProfile={onOpenProfile}
           />
         ) : (
-          <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-10 text-center">
-            <MessageSquare className="w-8 h-8 mx-auto text-[#65676B] dark:text-[#9CA3AF]" />
-            <p className="text-sm font-medium text-[#111827] dark:text-white mt-3">
+          <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl p-10 text-center">
+            <MessageSquare className="w-8 h-8 mx-auto text-[#64748B] dark:text-[#94A3B8]" />
+            <p className="text-sm font-medium text-[#0F172A] dark:text-white mt-3">
               Select a conversation
             </p>
           </div>
@@ -479,13 +481,13 @@ export function NotificationsPage({
   }
 
   return (
-    <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl overflow-hidden">
-      <div className="px-5 py-4 border-b border-[#E4E6EB] dark:border-[#2E3035] flex items-center justify-between gap-3">
+    <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl overflow-hidden">
+      <div className="px-5 py-4 border-b border-[#E5E8EE] dark:border-[#252A34] flex items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-display font-bold text-[#111827] dark:text-white">
+          <h1 className="text-xl font-display font-bold text-[#0F172A] dark:text-white">
             Notifications
           </h1>
-          <p className="text-xs text-[#65676B] dark:text-[#9CA3AF] mt-0.5 tabular-nums">
+          <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-0.5 tabular-nums">
             {unreadCount === 0 ? 'All caught up' : `${unreadCount} unread updates`}
           </p>
         </div>
@@ -494,7 +496,7 @@ export function NotificationsPage({
           <button
             type="button"
             onClick={onMarkAllRead}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#F0F2F5] dark:bg-[#2A2D32] hover:bg-[#E4E6EB] dark:hover:bg-[#35383E] text-xs font-semibold text-[#111827] dark:text-white transition-colors cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#F4F6F9] dark:bg-[#232732] hover:bg-[#E5E8EE] dark:hover:bg-[#2D3342] text-xs font-semibold text-[#0F172A] dark:text-white transition-colors cursor-pointer"
           >
             <Check className="w-3.5 h-3.5" />
             <span>Mark all read</span>
@@ -502,9 +504,9 @@ export function NotificationsPage({
         )}
       </div>
 
-      <div className="divide-y divide-[#E4E6EB] dark:divide-[#2E3035]">
+      <div className="divide-y divide-[#E5E8EE] dark:divide-[#252A34]">
         {notifications.length === 0 ? (
-          <div className="p-10 text-center text-sm text-[#65676B] dark:text-[#9CA3AF]">
+          <div className="p-10 text-center text-sm text-[#64748B] dark:text-[#94A3B8]">
             No notifications yet. Activity from friends and posts will appear here in real time.
           </div>
         ) : (
@@ -513,23 +515,23 @@ export function NotificationsPage({
               key={notif.id}
               type="button"
               onClick={() => onNotificationClick(notif)}
-              className={`w-full px-5 py-4 flex items-start gap-3.5 text-left hover:bg-[#F0F2F5] dark:hover:bg-[#24262B] transition-colors cursor-pointer ${
+              className={`w-full px-5 py-4 flex items-start gap-3.5 text-left hover:bg-[#F8FAFC] dark:hover:bg-[#1E222B] transition-colors cursor-pointer ${
                 !notif.read ? 'bg-[#1877F2]/5 dark:bg-[#3B82F6]/10' : ''
               }`}
             >
               {notif.actor_name ? (
                 <Avatar src={notif.actor_avatar} name={notif.actor_name} size="md" />
               ) : (
-                <div className="w-10 h-10 rounded-full bg-[#F0F2F5] dark:bg-[#2A2D32] flex items-center justify-center shrink-0">
+                <div className="w-10 h-10 rounded-full bg-[#F4F6F9] dark:bg-[#232732] flex items-center justify-center shrink-0">
                   {renderTypeIcon(notif.type)}
                 </div>
               )}
 
               <div className="flex-1 min-w-0">
-                <p className="text-sm text-[#111827] dark:text-[#F3F4F6] leading-snug">
+                <p className="text-sm text-[#0F172A] dark:text-[#F1F5F9] leading-snug">
                   {notif.message}
                 </p>
-                <div className="flex items-center gap-2 mt-1 text-xs text-[#65676B] dark:text-[#9CA3AF]">
+                <div className="flex items-center gap-2 mt-1 text-xs text-[#64748B] dark:text-[#94A3B8]">
                   <span className="tabular-nums">{formatRelativeTime(notif.created_at)}</span>
                   {!notif.read && (
                     <>

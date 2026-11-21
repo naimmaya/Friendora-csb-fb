@@ -222,11 +222,11 @@ export function MenuView({
             type="button"
             onClick={() => onNavigate('home')}
             aria-label="Back to Home"
-            className="w-10 h-10 rounded-full flex items-center justify-center text-[#111827] dark:text-white hover:bg-[#E4E6EB] dark:hover:bg-[#2A2D32] transition-colors cursor-pointer"
+            className="w-10 h-10 rounded-full flex items-center justify-center text-[#0F172A] dark:text-white hover:bg-[#E5E8EE] dark:hover:bg-[#232732] transition-colors cursor-pointer"
           >
             <ChevronLeft className="w-6 h-6" />
           </button>
-          <h1 className="text-2xl font-display font-extrabold tracking-tight text-[#111827] dark:text-white">
+          <h1 className="text-2xl font-display font-extrabold tracking-tight text-[#0F172A] dark:text-white">
             Menu
           </h1>
         </div>
@@ -240,7 +240,7 @@ export function MenuView({
             className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors cursor-pointer ${
               sortAlpha
                 ? 'bg-[#1877F2]/12 text-[#1877F2] dark:text-[#60A5FA]'
-                : 'text-[#111827] dark:text-white hover:bg-[#E4E6EB] dark:hover:bg-[#2A2D32]'
+                : 'text-[#0F172A] dark:text-white hover:bg-[#E5E8EE] dark:hover:bg-[#232732]'
             }`}
           >
             <ArrowUpDown className="w-5 h-5" />
@@ -255,7 +255,7 @@ export function MenuView({
             className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors cursor-pointer ${
               searchOpen
                 ? 'bg-[#1877F2]/12 text-[#1877F2] dark:text-[#60A5FA]'
-                : 'text-[#111827] dark:text-white hover:bg-[#E4E6EB] dark:hover:bg-[#2A2D32]'
+                : 'text-[#0F172A] dark:text-white hover:bg-[#E5E8EE] dark:hover:bg-[#232732]'
             }`}
           >
             <Search className="w-5 h-5" />
@@ -266,20 +266,20 @@ export function MenuView({
       {/* Optional inline search input */}
       {searchOpen && (
         <div className="relative">
-          <Search className="w-4 h-4 text-[#65676B] dark:text-[#9CA3AF] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <Search className="w-4 h-4 text-[#64748B] dark:text-[#94A3B8] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
             type="search"
             autoFocus
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             placeholder="Search shortcuts & settings..."
-            className="w-full h-11 pl-10 pr-4 rounded-2xl bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] text-sm text-[#111827] dark:text-white placeholder:text-[#65676B] dark:placeholder:text-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#1877F2]"
+            className="w-full h-11 pl-10 pr-4 rounded-2xl bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] text-sm text-[#0F172A] dark:text-white placeholder:text-[#64748B] dark:placeholder:text-[#94A3B8] focus:outline-none focus:ring-2 focus:ring-[#1877F2]/30 focus:border-[#1877F2]"
           />
         </div>
       )}
 
       {/* Card 1: Profile Card ("View your profile") */}
-      <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl overflow-hidden">
+      <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl overflow-hidden">
         <div className="px-4 py-3.5 flex items-center justify-between gap-3">
           <button
             type="button"
@@ -288,10 +288,10 @@ export function MenuView({
           >
             <Avatar src={currentUser.avatar_url} name={currentUser.name} size="md" />
             <div className="min-w-0">
-              <p className="font-display font-semibold text-base text-[#111827] dark:text-white truncate">
+              <p className="font-display font-semibold text-base text-[#0F172A] dark:text-white truncate">
                 {currentUser.name}
               </p>
-              <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">View your profile</p>
+              <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">View your profile</p>
             </div>
           </button>
 
@@ -301,7 +301,7 @@ export function MenuView({
                 type="button"
                 onClick={() => setSwitchOpen((prev) => !prev)}
                 title="Switch profile"
-                className="rounded-full ring-2 ring-[#E4E6EB] dark:ring-[#374151] p-0.5 cursor-pointer"
+                className="rounded-full ring-2 ring-[#E5E8EE] dark:ring-[#2D3342] p-0.5 cursor-pointer"
               >
                 <Avatar
                   src={switchableAccounts[0].avatar_url}
@@ -314,7 +314,7 @@ export function MenuView({
               type="button"
               onClick={() => setProfileMenuOpen((prev) => !prev)}
               aria-label="Toggle profile options"
-              className="w-9 h-9 rounded-full bg-[#F0F2F5] dark:bg-[#2A2D32] hover:bg-[#E4E6EB] dark:hover:bg-[#35383E] flex items-center justify-center text-[#111827] dark:text-white transition-colors cursor-pointer"
+              className="w-9 h-9 rounded-full bg-[#F4F6F9] dark:bg-[#232732] hover:bg-[#E5E8EE] dark:hover:bg-[#2D3342] flex items-center justify-center text-[#0F172A] dark:text-white transition-colors cursor-pointer"
             >
               {profileMenuOpen ? (
                 <ChevronUp className="w-5 h-5" />
@@ -326,25 +326,25 @@ export function MenuView({
         </div>
 
         {profileMenuOpen && (
-          <div className="px-4 pb-3 pt-2 border-t border-[#E4E6EB] dark:border-[#2E3035] flex flex-wrap gap-2">
+          <div className="px-4 pb-3 pt-2 border-t border-[#E5E8EE] dark:border-[#252A34] flex flex-wrap gap-2">
             <button
               type="button"
               onClick={() => onNavigate('profile', currentUser.id)}
-              className="px-3.5 py-2 rounded-xl bg-[#F0F2F5] dark:bg-[#2A2D32] hover:bg-[#E4E6EB] dark:hover:bg-[#35383E] text-xs font-semibold text-[#111827] dark:text-white cursor-pointer"
+              className="px-3.5 py-2 rounded-xl bg-[#F4F6F9] dark:bg-[#232732] hover:bg-[#E5E8EE] dark:hover:bg-[#2D3342] text-xs font-semibold text-[#0F172A] dark:text-white transition-colors cursor-pointer"
             >
               Edit Profile &amp; Bio
             </button>
             <button
               type="button"
               onClick={() => onNavigate('dashboard')}
-              className="px-3.5 py-2 rounded-xl bg-[#F0F2F5] dark:bg-[#2A2D32] hover:bg-[#E4E6EB] dark:hover:bg-[#35383E] text-xs font-semibold text-[#111827] dark:text-white cursor-pointer"
+              className="px-3.5 py-2 rounded-xl bg-[#F4F6F9] dark:bg-[#232732] hover:bg-[#E5E8EE] dark:hover:bg-[#2D3342] text-xs font-semibold text-[#0F172A] dark:text-white transition-colors cursor-pointer"
             >
               View Insights
             </button>
             <button
               type="button"
               onClick={() => onNavigate('activity')}
-              className="px-3.5 py-2 rounded-xl bg-[#F0F2F5] dark:bg-[#2A2D32] hover:bg-[#E4E6EB] dark:hover:bg-[#35383E] text-xs font-semibold text-[#111827] dark:text-white cursor-pointer"
+              className="px-3.5 py-2 rounded-xl bg-[#F4F6F9] dark:bg-[#232732] hover:bg-[#E5E8EE] dark:hover:bg-[#2D3342] text-xs font-semibold text-[#0F172A] dark:text-white transition-colors cursor-pointer"
             >
               Activity Log
             </button>
@@ -353,18 +353,18 @@ export function MenuView({
       </div>
 
       {/* Card 2: Switch Account */}
-      <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl overflow-hidden">
+      <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl overflow-hidden">
         <button
           type="button"
           onClick={() => setSwitchOpen((prev) => !prev)}
-          className="w-full px-4 py-3.5 flex items-center justify-between gap-3 hover:bg-[#F8F9FA] dark:hover:bg-[#24262B] transition-colors cursor-pointer"
+          className="w-full px-4 py-3.5 flex items-center justify-between gap-3 hover:bg-[#F8FAFC] dark:hover:bg-[#1E222B] transition-colors cursor-pointer"
         >
           <div className="flex items-center gap-3 min-w-0">
             <div className="flex items-center -space-x-2 shrink-0">
               {switchableAccounts.slice(0, 2).map((acc) => (
                 <div
                   key={acc.id}
-                  className="rounded-full ring-2 ring-white dark:ring-[#1C1E21]"
+                  className="rounded-full ring-2 ring-white dark:ring-[#16191F]"
                 >
                   <Avatar src={acc.avatar_url} name={acc.name} size="xs" />
                 </div>
@@ -373,33 +373,33 @@ export function MenuView({
                 <Avatar src={currentUser.avatar_url} name={currentUser.name} size="xs" />
               )}
             </div>
-            <span className="font-display font-semibold text-[15px] text-[#374151] dark:text-[#E5E7EB]">
+            <span className="font-display font-semibold text-[15px] text-[#334155] dark:text-[#E2E8F0]">
               Switch account
             </span>
           </div>
 
-          <span className="w-9 h-9 rounded-full bg-[#F0F2F5] dark:bg-[#2A2D32] flex items-center justify-center text-[#111827] dark:text-white shrink-0">
+          <span className="w-9 h-9 rounded-full bg-[#F4F6F9] dark:bg-[#232732] flex items-center justify-center text-[#0F172A] dark:text-white shrink-0">
             {switchOpen ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
           </span>
         </button>
 
         {switchOpen && (
-          <div className="px-3 pb-3 pt-1 border-t border-[#E4E6EB] dark:border-[#2E3035] space-y-1">
+          <div className="px-3 pb-3 pt-1 border-t border-[#E5E8EE] dark:border-[#252A34] space-y-1">
             {switchableAccounts.map((acc) => (
               <button
                 key={acc.id}
                 type="button"
                 disabled={switchingId === acc.id}
                 onClick={() => handleQuickSwitch(acc.id)}
-                className="w-full px-3 py-2.5 rounded-xl flex items-center justify-between gap-3 hover:bg-[#F0F2F5] dark:hover:bg-[#2A2D32] transition-colors text-left cursor-pointer"
+                className="w-full px-3 py-2.5 rounded-xl flex items-center justify-between gap-3 hover:bg-[#F4F6F9] dark:hover:bg-[#232732] transition-colors text-left cursor-pointer"
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <Avatar src={acc.avatar_url} name={acc.name} size="sm" />
                   <div className="min-w-0">
-                    <p className="text-sm font-semibold text-[#111827] dark:text-white truncate">
+                    <p className="text-sm font-semibold text-[#0F172A] dark:text-white truncate">
                       {acc.name}
                     </p>
-                    <p className="text-xs text-[#65676B] dark:text-[#9CA3AF] truncate">
+                    <p className="text-xs text-[#64748B] dark:text-[#94A3B8] truncate">
                       {acc.email || acc.work}
                     </p>
                   </div>
@@ -413,7 +413,7 @@ export function MenuView({
             <button
               type="button"
               onClick={onLogout}
-              className="w-full px-3 py-2.5 rounded-xl flex items-center gap-2.5 text-sm font-semibold text-[#1877F2] dark:text-[#60A5FA] hover:bg-[#F0F2F5] dark:hover:bg-[#2A2D32] transition-colors cursor-pointer"
+              className="w-full px-3 py-2.5 rounded-xl flex items-center gap-2.5 text-sm font-semibold text-[#1877F2] dark:text-[#60A5FA] hover:bg-[#F4F6F9] dark:hover:bg-[#232732] transition-colors cursor-pointer"
             >
               <UserPlus className="w-4 h-4" />
               <span>Sign in with another account or create new</span>
@@ -423,38 +423,38 @@ export function MenuView({
       </div>
 
       {/* Card 3: Invite Friends */}
-      <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl overflow-hidden">
+      <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl overflow-hidden">
         <button
           type="button"
           onClick={() => setInviteOpen((prev) => !prev)}
-          className="w-full px-4 py-3.5 flex items-center justify-between gap-3 hover:bg-[#F8F9FA] dark:hover:bg-[#24262B] transition-colors cursor-pointer"
+          className="w-full px-4 py-3.5 flex items-center justify-between gap-3 hover:bg-[#F8FAFC] dark:hover:bg-[#1E222B] transition-colors cursor-pointer"
         >
           <div className="flex items-center gap-3">
             <span className="w-8 h-8 rounded-full bg-[#FFF1F2] dark:bg-[#881337]/40 flex items-center justify-center text-[#E11D48] dark:text-[#FB7185] shrink-0">
               <Heart className="w-4 h-4 fill-current" />
             </span>
-            <span className="font-display font-semibold text-[15px] text-[#111827] dark:text-white">
+            <span className="font-display font-semibold text-[15px] text-[#0F172A] dark:text-white">
               Invite friends
             </span>
           </div>
-          <span className="text-xs font-medium text-[#65676B] dark:text-[#9CA3AF]">
+          <span className="text-xs font-medium text-[#64748B] dark:text-[#94A3B8]">
             {inviteOpen ? 'Hide' : 'Share link'}
           </span>
         </button>
 
         {inviteOpen && (
-          <div className="px-4 pb-4 pt-2 border-t border-[#E4E6EB] dark:border-[#2E3035] space-y-2.5">
-            <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
+          <div className="px-4 pb-4 pt-2 border-t border-[#E5E8EE] dark:border-[#252A34] space-y-2.5">
+            <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
               Share your personal invite link so friends can join Verve with email or phone.
             </p>
             <div className="flex items-center gap-2">
-              <code className="flex-1 px-3 py-2 rounded-xl bg-[#F0F2F5] dark:bg-[#121316] font-mono text-xs text-[#111827] dark:text-[#E5E7EB] truncate">
+              <code className="flex-1 px-3 py-2 rounded-xl bg-[#F4F6F9] dark:bg-[#0E1014] border border-[#E5E8EE] dark:border-[#252A34] font-mono text-xs text-[#0F172A] dark:text-[#E2E8F0] truncate">
                 {`${window.location.origin}/register?ref=${currentUser.id}`}
               </code>
               <button
                 type="button"
                 onClick={handleCopyInvite}
-                className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] text-white text-xs font-semibold whitespace-nowrap cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] text-white text-xs font-semibold whitespace-nowrap active:scale-[0.98] transition-all cursor-pointer"
               >
                 {copiedInvite ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copiedInvite ? 'Copied' : 'Copy Link'}</span>
@@ -473,14 +473,14 @@ export function MenuView({
               key={item.id}
               type="button"
               onClick={() => onNavigate(item.view)}
-              className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] hover:border-[#CBD5E1] dark:hover:border-[#4B5563] rounded-2xl p-3.5 sm:p-4 flex flex-col items-start gap-2.5 text-left transition-colors cursor-pointer"
+              className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] hover:border-[#CBD5E1] dark:hover:border-[#374151] hover:bg-[#F8FAFC] dark:hover:bg-[#1B1F27] rounded-2xl p-3.5 sm:p-4 flex flex-col items-start gap-2.5 text-left transition-all active:scale-[0.99] cursor-pointer"
             >
               <span
                 className={`w-9 h-9 rounded-xl ${item.iconBg} ${item.iconColor} flex items-center justify-center shrink-0`}
               >
                 <Icon className="w-5 h-5" />
               </span>
-              <span className="font-display font-semibold text-[15px] text-[#111827] dark:text-[#F3F4F6] truncate w-full">
+              <span className="font-display font-semibold text-[15px] text-[#0F172A] dark:text-[#F1F5F9] truncate w-full">
                 {item.label}
               </span>
             </button>
@@ -489,30 +489,30 @@ export function MenuView({
       </div>
 
       {visibleShortcuts.length === 0 && (
-        <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-6 text-center text-sm text-[#65676B] dark:text-[#9CA3AF]">
+        <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl p-6 text-center text-sm text-[#64748B] dark:text-[#94A3B8]">
           No shortcuts match &ldquo;{searchTerm}&rdquo;.
         </div>
       )}
 
       {/* Expandable "Settings & privacy" Section (matching bottom of screenshot) */}
-      <div className="pt-2 border-t border-[#E4E6EB] dark:border-[#2E3035] space-y-2">
+      <div className="pt-2 border-t border-[#E5E8EE] dark:border-[#252A34] space-y-2">
         <button
           type="button"
           onClick={() => setSettingsOpen((prev) => !prev)}
-          className="w-full px-3 py-3 rounded-2xl hover:bg-white/70 dark:hover:bg-[#1C1E21] flex items-center justify-between gap-3 transition-colors cursor-pointer"
+          className="w-full px-3 py-3 rounded-2xl hover:bg-white/80 dark:hover:bg-[#16191F] flex items-center justify-between gap-3 transition-colors cursor-pointer"
         >
           <div className="flex items-center gap-3">
-            <span className="w-9 h-9 rounded-full bg-[#E4E6EB] dark:bg-[#2A2D32] text-[#4B5563] dark:text-[#D1D5DB] flex items-center justify-center shrink-0">
+            <span className="w-9 h-9 rounded-full bg-[#E5E8EE] dark:bg-[#232732] text-[#475569] dark:text-[#CBD5E1] flex items-center justify-center shrink-0">
               <Settings className="w-5 h-5" />
             </span>
-            <span className="font-display font-bold text-base text-[#111827] dark:text-white">
+            <span className="font-display font-bold text-base text-[#0F172A] dark:text-white">
               Settings &amp; privacy
             </span>
           </div>
           {settingsOpen ? (
-            <ChevronUp className="w-5 h-5 text-[#65676B] dark:text-[#9CA3AF]" />
+            <ChevronUp className="w-5 h-5 text-[#64748B] dark:text-[#94A3B8]" />
           ) : (
-            <ChevronDown className="w-5 h-5 text-[#65676B] dark:text-[#9CA3AF]" />
+            <ChevronDown className="w-5 h-5 text-[#64748B] dark:text-[#94A3B8]" />
           )}
         </button>
 
@@ -521,14 +521,14 @@ export function MenuView({
             <button
               type="button"
               onClick={() => onOpenSettingsSection('overview')}
-              className="w-full bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] hover:border-[#CBD5E1] dark:hover:border-[#4B5563] rounded-2xl px-4 py-3.5 flex items-center gap-3 text-left transition-colors cursor-pointer"
+              className="w-full bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] hover:border-[#CBD5E1] dark:hover:border-[#374151] hover:bg-[#F8FAFC] dark:hover:bg-[#1B1F27] rounded-2xl px-4 py-3.5 flex items-center gap-3 text-left transition-all cursor-pointer"
             >
-              <Settings className="w-5 h-5 text-[#4B5563] dark:text-[#9CA3AF] shrink-0" />
+              <Settings className="w-5 h-5 text-[#475569] dark:text-[#94A3B8] shrink-0" />
               <div>
-                <p className="font-display font-semibold text-sm text-[#111827] dark:text-white">
+                <p className="font-display font-semibold text-sm text-[#0F172A] dark:text-white">
                   Settings
                 </p>
-                <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
+                <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
                   Accounts Centre, personal details, password, and privacy
                 </p>
               </div>
@@ -537,14 +537,14 @@ export function MenuView({
             <button
               type="button"
               onClick={() => onOpenSettingsSection('personal-details')}
-              className="w-full bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] hover:border-[#CBD5E1] dark:hover:border-[#4B5563] rounded-2xl px-4 py-3.5 flex items-center gap-3 text-left transition-colors cursor-pointer"
+              className="w-full bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] hover:border-[#CBD5E1] dark:hover:border-[#374151] hover:bg-[#F8FAFC] dark:hover:bg-[#1B1F27] rounded-2xl px-4 py-3.5 flex items-center gap-3 text-left transition-all cursor-pointer"
             >
               <Users className="w-5 h-5 text-[#1877F2] dark:text-[#60A5FA] shrink-0" />
               <div>
-                <p className="font-display font-semibold text-sm text-[#111827] dark:text-white">
+                <p className="font-display font-semibold text-sm text-[#0F172A] dark:text-white">
                   Personal details
                 </p>
-                <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
+                <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
                   Connected profiles, Pages, contact info, and date of birth
                 </p>
               </div>
@@ -553,14 +553,14 @@ export function MenuView({
             <button
               type="button"
               onClick={() => onOpenSettingsSection('password-security')}
-              className="w-full bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] hover:border-[#CBD5E1] dark:hover:border-[#4B5563] rounded-2xl px-4 py-3.5 flex items-center gap-3 text-left transition-colors cursor-pointer"
+              className="w-full bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] hover:border-[#CBD5E1] dark:hover:border-[#374151] hover:bg-[#F8FAFC] dark:hover:bg-[#1B1F27] rounded-2xl px-4 py-3.5 flex items-center gap-3 text-left transition-all cursor-pointer"
             >
-              <Lock className="w-5 h-5 text-[#4B5563] dark:text-[#9CA3AF] shrink-0" />
+              <Lock className="w-5 h-5 text-[#475569] dark:text-[#94A3B8] shrink-0" />
               <div>
-                <p className="font-display font-semibold text-sm text-[#111827] dark:text-white">
+                <p className="font-display font-semibold text-sm text-[#0F172A] dark:text-white">
                   Password and security
                 </p>
-                <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
+                <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
                   Change password, 2FA, passkeys, active logins, and alerts
                 </p>
               </div>
@@ -569,14 +569,14 @@ export function MenuView({
             <button
               type="button"
               onClick={() => onOpenSettingsSection('privacy')}
-              className="w-full bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] hover:border-[#CBD5E1] dark:hover:border-[#4B5563] rounded-2xl px-4 py-3.5 flex items-center gap-3 text-left transition-colors cursor-pointer"
+              className="w-full bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] hover:border-[#CBD5E1] dark:hover:border-[#374151] hover:bg-[#F8FAFC] dark:hover:bg-[#1B1F27] rounded-2xl px-4 py-3.5 flex items-center gap-3 text-left transition-all cursor-pointer"
             >
               <ShieldCheck className="w-5 h-5 text-[#1877F2] dark:text-[#60A5FA] shrink-0" />
               <div>
-                <p className="font-display font-semibold text-sm text-[#111827] dark:text-white">
+                <p className="font-display font-semibold text-sm text-[#0F172A] dark:text-white">
                   Privacy Checkup
                 </p>
-                <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
+                <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
                   Control who sees your profile, posts, and active status
                 </p>
               </div>
@@ -585,19 +585,19 @@ export function MenuView({
             <button
               type="button"
               onClick={onToggleTheme}
-              className="w-full bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] hover:border-[#CBD5E1] dark:hover:border-[#4B5563] rounded-2xl px-4 py-3.5 flex items-center justify-between gap-3 text-left transition-colors cursor-pointer"
+              className="w-full bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] hover:border-[#CBD5E1] dark:hover:border-[#374151] hover:bg-[#F8FAFC] dark:hover:bg-[#1B1F27] rounded-2xl px-4 py-3.5 flex items-center justify-between gap-3 text-left transition-all cursor-pointer"
             >
               <div className="flex items-center gap-3">
                 {theme === 'dark' ? (
                   <Sun className="w-5 h-5 text-[#F59E0B] shrink-0" />
                 ) : (
-                  <Moon className="w-5 h-5 text-[#4B5563] shrink-0" />
+                  <Moon className="w-5 h-5 text-[#475569] shrink-0" />
                 )}
                 <div>
-                  <p className="font-display font-semibold text-sm text-[#111827] dark:text-white">
+                  <p className="font-display font-semibold text-sm text-[#0F172A] dark:text-white">
                     Dark Mode
                   </p>
-                  <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
+                  <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
                     Currently {theme === 'dark' ? 'On' : 'Off'} — tap to switch
                   </p>
                 </div>
@@ -610,14 +610,14 @@ export function MenuView({
             <button
               type="button"
               onClick={() => onNavigate('activity')}
-              className="w-full bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] hover:border-[#CBD5E1] dark:hover:border-[#4B5563] rounded-2xl px-4 py-3.5 flex items-center gap-3 text-left transition-colors cursor-pointer"
+              className="w-full bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] hover:border-[#CBD5E1] dark:hover:border-[#374151] hover:bg-[#F8FAFC] dark:hover:bg-[#1B1F27] rounded-2xl px-4 py-3.5 flex items-center gap-3 text-left transition-all cursor-pointer"
             >
-              <Clock className="w-5 h-5 text-[#4B5563] dark:text-[#9CA3AF] shrink-0" />
+              <Clock className="w-5 h-5 text-[#475569] dark:text-[#94A3B8] shrink-0" />
               <div>
-                <p className="font-display font-semibold text-sm text-[#111827] dark:text-white">
+                <p className="font-display font-semibold text-sm text-[#0F172A] dark:text-white">
                   Activity Log
                 </p>
-                <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
+                <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
                   Review your recent posts, likes, and comments
                 </p>
               </div>
@@ -626,14 +626,14 @@ export function MenuView({
             <button
               type="button"
               onClick={() => onOpenSettingsSection('appearance')}
-              className="w-full bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] hover:border-[#CBD5E1] dark:hover:border-[#4B5563] rounded-2xl px-4 py-3.5 flex items-center gap-3 text-left transition-colors cursor-pointer"
+              className="w-full bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] hover:border-[#CBD5E1] dark:hover:border-[#374151] hover:bg-[#F8FAFC] dark:hover:bg-[#1B1F27] rounded-2xl px-4 py-3.5 flex items-center gap-3 text-left transition-all cursor-pointer"
             >
-              <Globe className="w-5 h-5 text-[#4B5563] dark:text-[#9CA3AF] shrink-0" />
+              <Globe className="w-5 h-5 text-[#475569] dark:text-[#94A3B8] shrink-0" />
               <div>
-                <p className="font-display font-semibold text-sm text-[#111827] dark:text-white">
+                <p className="font-display font-semibold text-sm text-[#0F172A] dark:text-white">
                   Language &amp; Display
                 </p>
-                <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
+                <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
                   Choose preferred language and display settings
                 </p>
               </div>
@@ -646,7 +646,7 @@ export function MenuView({
       <button
         type="button"
         onClick={onLogout}
-        className="w-full h-11 rounded-2xl bg-[#E4E6EB] hover:bg-[#D8DADF] dark:bg-[#2A2D32] dark:hover:bg-[#35383E] text-[#111827] dark:text-white font-display font-semibold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+        className="w-full h-11 rounded-2xl bg-[#E5E8EE] hover:bg-[#DCE1EA] dark:bg-[#232732] dark:hover:bg-[#2D3342] text-[#0F172A] dark:text-white font-display font-semibold text-sm flex items-center justify-center gap-2 active:scale-[0.99] transition-all cursor-pointer"
       >
         <LogOut className="w-4 h-4" />
         <span>Log out</span>

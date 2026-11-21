@@ -63,7 +63,7 @@ export function PostComposer({currentUser, onPostCreated, onOpenProfile}: PostCo
   return (
     <form
       onSubmit={handleSubmit}
-      className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-4 sm:p-5"
+      className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-4 sm:p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
     >
       <div className="flex items-start gap-3">
         <button
@@ -77,10 +77,11 @@ export function PostComposer({currentUser, onPostCreated, onOpenProfile}: PostCo
         <div className="flex-1 min-w-0">
           <textarea
             rows={2}
+            maxLength={2000}
             value={content}
             onChange={(e) => setContent(e.target.value)}
             placeholder={`What's on your mind, ${firstName}?`}
-            className="w-full resize-none bg-[#F0F2F5] dark:bg-[#121316] rounded-xl px-3.5 py-2.5 text-[15px] text-[#111827] dark:text-[#F3F4F6] placeholder:text-[#65676B] dark:placeholder:text-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#1877F2] dark:focus:ring-[#3B82F6]"
+            className="w-full resize-none bg-[#F4F6F9] dark:bg-[#0E1014] rounded-xl px-3.5 py-2.5 text-[15px] text-[#0F172A] dark:text-[#F1F5F9] placeholder:text-[#64748B] dark:placeholder:text-[#94A3B8] focus:outline-none focus:ring-2 focus:ring-[#1877F2] dark:focus:ring-[#3B82F6]"
           />
 
           {imageUrl && (
@@ -132,14 +133,21 @@ export function PostComposer({currentUser, onPostCreated, onOpenProfile}: PostCo
               </button>
             </div>
 
-            <button
-              type="submit"
-              disabled={submitting || uploading || (!content.trim() && !imageUrl)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#1877F2] hover:bg-[#166FE5] dark:bg-[#2563EB] dark:hover:bg-[#1D4ED8] text-white text-sm font-semibold transition-colors disabled:opacity-50 whitespace-nowrap cursor-pointer"
-            >
-              <Send className="w-4 h-4" />
-              <span>{submitting ? 'Posting...' : 'Post'}</span>
-            </button>
+            <div className="flex items-center gap-3">
+              {content.length > 0 && (
+                <span className="text-[11px] text-[#64748B] dark:text-[#94A3B8] tabular-nums">
+                  {content.length}/2000
+                </span>
+              )}
+              <button
+                type="submit"
+                disabled={submitting || uploading || (!content.trim() && !imageUrl)}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] dark:bg-[#2563EB] dark:hover:bg-[#1D4ED8] text-white text-sm font-semibold transition-all active:scale-[0.985] disabled:opacity-50 whitespace-nowrap cursor-pointer"
+              >
+                <Send className="w-4 h-4" />
+                <span>{submitting ? 'Posting...' : 'Post'}</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>

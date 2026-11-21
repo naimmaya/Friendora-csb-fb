@@ -209,10 +209,20 @@ export function AuthGate({
     });
   }
 
+  const regStrength = (() => {
+    if (!regPassword) return 0;
+    let s = 0;
+    if (regPassword.length >= 6) s++;
+    if (regPassword.length >= 10) s++;
+    if (/[A-Z]/.test(regPassword) && /[a-z]/.test(regPassword)) s++;
+    if (/\d/.test(regPassword) && /[^A-Za-z0-9]/.test(regPassword)) s++;
+    return Math.min(4, Math.max(1, s));
+  })();
+
   return (
-    <div className="min-h-screen bg-[#F0F2F5] dark:bg-[#121316] text-[#111827] dark:text-[#F3F4F6] flex flex-col">
+    <div className="min-h-screen bg-[#F4F6F9] dark:bg-[#0E1014] text-[#0F172A] dark:text-[#F1F5F9] flex flex-col">
       {/* Minimal clean entry top bar */}
-      <header className="w-full border-b border-[#E4E6EB] dark:border-[#2E3035] bg-white dark:bg-[#1C1E21]">
+      <header className="w-full border-b border-[#E5E8EE] dark:border-[#252A34] bg-white/90 dark:bg-[#16191F]/90 backdrop-blur-xl">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-8">
           <button
             type="button"
@@ -301,7 +311,7 @@ export function AuthGate({
 
           {/* Right auth card */}
           <section className="lg:col-span-5 flex items-center">
-            <div className="w-full bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-6 sm:p-8 shadow-sm">
+            <div className="w-full bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-6 sm:p-8 shadow-[0_8px_28px_rgba(15,23,42,0.06)] dark:shadow-[0_12px_32px_rgba(0,0,0,0.35)]">
               {/* Switcher between Sign In and Create Account */}
               {(authView === 'login' || authView === 'register') && (
                 <div
@@ -563,11 +573,31 @@ export function AuthGate({
                         type="button"
                         onClick={() => setShowRegPassword((prev) => !prev)}
                         aria-label={showRegPassword ? 'Hide password' : 'Show password'}
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1.5 text-[#65676B] dark:text-[#9CA3AF] hover:text-[#111827] dark:hover:text-white cursor-pointer"
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1.5 text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F172A] dark:hover:text-white cursor-pointer"
                       >
                         {showRegPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                       </button>
                     </div>
+                    {regStrength > 0 && (
+                      <div className="mt-2 grid grid-cols-4 gap-1.5">
+                        {[1, 2, 3, 4].map((step) => (
+                          <div
+                            key={step}
+                            className={`h-1 rounded-full transition-colors ${
+                              step <= regStrength
+                                ? regStrength >= 4
+                                  ? 'bg-[#16A34A]'
+                                  : regStrength === 3
+                                    ? 'bg-[#1877F2]'
+                                    : regStrength === 2
+                                      ? 'bg-[#D97706]'
+                                      : 'bg-[#DC2626]'
+                                : 'bg-[#E2E8F0] dark:bg-[#252A34]'
+                            }`}
+                          />
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   <button

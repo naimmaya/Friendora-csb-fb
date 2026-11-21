@@ -639,9 +639,9 @@ export default function App() {
   const onlineSet = new Set(onlineUserIds);
 
   return (
-    <div className="min-h-screen bg-[#F0F2F5] dark:bg-[#121316] text-[#111827] dark:text-[#F3F4F6] pb-16 md:pb-8">
+    <div className="min-h-screen bg-[#F4F6F9] dark:bg-[#0E1014] text-[#0F172A] dark:text-[#F1F5F9] pb-16 md:pb-8">
       {/* Top Bar: Clean 3-zone contract */}
-      <header className="sticky top-0 z-30 h-14 sm:h-16 bg-white/95 dark:bg-[#1C1E21]/95 backdrop-blur-md border-b border-[#E4E6EB] dark:border-[#2E3035]">
+      <header className="sticky top-0 z-30 h-14 sm:h-16 bg-white/90 dark:bg-[#16191F]/90 backdrop-blur-xl border-b border-[#E5E8EE] dark:border-[#252A34]">
         <div className="max-w-[1440px] mx-auto px-4 sm:px-6 h-full flex items-center justify-between gap-8">
           {/* Zone 1: Brand Wordmark */}
           <button
@@ -746,39 +746,65 @@ export default function App() {
         <div className="flex items-start justify-center gap-6">
           {/* LEFT RAIL (Desktop) */}
           <aside className="hidden lg:flex flex-col gap-4 w-[260px] shrink-0 sticky top-[5.25rem]">
-            {/* Account Summary Card */}
-            <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-4 space-y-3">
-              <button
-                type="button"
-                onClick={() => navigateApp('profile', currentUser.id)}
-                className="flex items-center gap-3 w-full text-left group cursor-pointer"
-              >
-                <Avatar src={currentUser.avatar_url} name={currentUser.name} size="md" />
-                <div className="min-w-0">
-                  <p className="font-display font-semibold text-sm text-[#111827] dark:text-white truncate group-hover:underline">
-                    {currentUser.name}
+            {/* Account Summary Card with subtle cover accent */}
+            <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+              <div className="h-14 w-full bg-[#1E293B] relative overflow-hidden">
+                {currentUser.cover_url && (
+                  <img
+                    src={currentUser.cover_url}
+                    alt=""
+                    aria-hidden="true"
+                    referrerPolicy="no-referrer"
+                    className="w-full h-full object-cover opacity-90"
+                  />
+                )}
+                <div className="absolute inset-0 bg-gradient-to-t from-black/35 to-transparent" />
+              </div>
+              <div className="px-4 pb-4 -mt-6 relative space-y-3">
+                <button
+                  type="button"
+                  onClick={() => navigateApp('profile', currentUser.id)}
+                  className="flex flex-col items-start gap-2 w-full text-left group cursor-pointer"
+                >
+                  <div className="rounded-full p-0.5 bg-white dark:bg-[#16191F]">
+                    <Avatar src={currentUser.avatar_url} name={currentUser.name} size="md" />
+                  </div>
+                  <div className="min-w-0 w-full">
+                    <p className="font-display font-bold text-[15px] text-[#0F172A] dark:text-white truncate group-hover:underline">
+                      {currentUser.name}
+                    </p>
+                    <p className="text-xs text-[#64748B] dark:text-[#94A3B8] truncate">
+                      {currentUser.work || 'View & edit profile'}
+                    </p>
+                  </div>
+                </button>
+
+                {currentUser.bio && (
+                  <p className="text-xs text-[#475569] dark:text-[#94A3B8] line-clamp-2 leading-relaxed">
+                    {currentUser.bio}
                   </p>
-                  <p className="text-xs text-[#65676B] dark:text-[#9CA3AF] truncate">
-                    {currentUser.work || 'View & edit profile'}
-                  </p>
+                )}
+
+                <div className="pt-2.5 border-t border-[#E5E8EE] dark:border-[#252A34] flex items-center justify-between text-xs text-[#64748B] dark:text-[#94A3B8] tabular-nums">
+                  <span>
+                    <strong className="text-[#0F172A] dark:text-white font-semibold">
+                      {network.friends.length}
+                    </strong>{' '}
+                    friends
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span>
+                    <strong className="text-[#0F172A] dark:text-white font-semibold">
+                      {network.followingIds.length}
+                    </strong>{' '}
+                    following
+                  </span>
                 </div>
-              </button>
-
-              {currentUser.bio && (
-                <p className="text-xs text-[#4B5563] dark:text-[#9CA3AF] line-clamp-2 leading-relaxed">
-                  {currentUser.bio}
-                </p>
-              )}
-
-              <div className="pt-2 border-t border-[#E4E6EB] dark:border-[#2E3035] flex items-center justify-between text-xs text-[#65676B] dark:text-[#9CA3AF] tabular-nums">
-                <span>{network.friends.length} friends</span>
-                <span aria-hidden="true">·</span>
-                <span>{network.followingIds.length} following</span>
               </div>
             </div>
 
             {/* Search People */}
-            <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-3.5 space-y-2.5">
+            <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-3.5 space-y-2.5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
               <div className="relative">
                 <Search className="w-4 h-4 text-[#65676B] dark:text-[#9CA3AF] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
@@ -824,7 +850,7 @@ export default function App() {
             </div>
 
             {/* Preferences & Sign Out */}
-            <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-2 space-y-1">
+            <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-2 space-y-1 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
               <button
                 type="button"
                 onClick={() => navigateApp('menu')}
@@ -1022,6 +1048,10 @@ export default function App() {
                 onUserUpdated={(updated) => setCurrentUser(updated)}
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
                 onOpenChat={handleOpenChat}
+                onOpenAccountsCentre={() => {
+                  setSettingsSection('personal-details');
+                  navigateApp('settings');
+                }}
                 onNetworkChanged={() => {
                   loadNetwork();
                   loadConversations();
@@ -1226,7 +1256,7 @@ export default function App() {
       {/* Mobile Bottom Navigation Bar */}
       <nav
         aria-label="Mobile navigation"
-        className="md:hidden fixed bottom-0 inset-x-0 z-40 h-14 bg-white/95 dark:bg-[#1C1E21]/95 backdrop-blur-md border-t border-[#E4E6EB] dark:border-[#2E3035] grid grid-cols-5 items-center"
+        className="md:hidden fixed bottom-0 inset-x-0 z-40 h-14 bg-white/90 dark:bg-[#16191F]/90 backdrop-blur-xl border-t border-[#E5E8EE] dark:border-[#252A34] grid grid-cols-5 items-center"
       >
         <button
           type="button"

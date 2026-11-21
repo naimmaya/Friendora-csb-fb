@@ -32,6 +32,7 @@ interface ProfileViewProps {
   onUserUpdated: (user: UserProfile) => void;
   onOpenProfile: (userId: number) => void;
   onOpenChat: (user: UserProfile) => void;
+  onOpenAccountsCentre?: () => void;
   onNetworkChanged: () => void;
   onPostMutated: () => void;
 }
@@ -42,6 +43,7 @@ export function ProfileView({
   onUserUpdated,
   onOpenProfile,
   onOpenChat,
+  onOpenAccountsCentre,
   onNetworkChanged,
   onPostMutated,
 }: ProfileViewProps) {
@@ -335,7 +337,7 @@ export function ProfileView({
       />
 
       {/* Profile Header Card */}
-      <section className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl overflow-hidden">
+      <section className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
         {/* Cover Banner */}
         <div className="relative h-48 sm:h-64 bg-[#1E293B] overflow-hidden">
           <CoverImage src={displayedCover} alt={`${profile.name}'s cover photo`} />
@@ -752,42 +754,55 @@ export function ProfileView({
       {/* Profile Content Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
         {/* Left Intro Sidebar */}
-        <aside className="lg:col-span-5 bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-5 space-y-4">
-          <h2 className="text-base font-display font-bold text-[#111827] dark:text-white">
+        <aside className="lg:col-span-5 bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-5 space-y-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+          <h2 className="text-base font-display font-bold text-[#0F172A] dark:text-white">
             Intro
           </h2>
 
-          <p className="text-sm text-[#374151] dark:text-[#D1D5DB] leading-relaxed">
+          <p className="text-sm text-[#334155] dark:text-[#CBD5E1] leading-relaxed">
             {profile.bio || 'No bio added yet.'}
           </p>
 
-          <dl className="space-y-3 pt-2 border-t border-[#E4E6EB] dark:border-[#2E3035] text-sm text-[#4B5563] dark:text-[#9CA3AF]">
+          <dl className="space-y-3 pt-2 border-t border-[#E5E8EE] dark:border-[#252A34] text-sm text-[#475569] dark:text-[#94A3B8]">
             {profile.work && (
               <div className="flex items-center gap-2.5">
-                <Briefcase className="w-4 h-4 shrink-0 text-[#65676B] dark:text-[#9CA3AF]" />
-                <dd className="text-[#111827] dark:text-[#E5E7EB]">{profile.work}</dd>
+                <Briefcase className="w-4 h-4 shrink-0 text-[#64748B] dark:text-[#94A3B8]" />
+                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">{profile.work}</dd>
               </div>
             )}
             {profile.location && (
               <div className="flex items-center gap-2.5">
-                <MapPin className="w-4 h-4 shrink-0 text-[#65676B] dark:text-[#9CA3AF]" />
-                <dd className="text-[#111827] dark:text-[#E5E7EB]">Lives in {profile.location}</dd>
+                <MapPin className="w-4 h-4 shrink-0 text-[#64748B] dark:text-[#94A3B8]" />
+                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">Lives in {profile.location}</dd>
               </div>
             )}
             {isOwnProfile && profile.email && (
               <div className="flex items-center gap-2.5">
-                <Mail className="w-4 h-4 shrink-0 text-[#65676B] dark:text-[#9CA3AF]" />
-                <dd className="text-[#111827] dark:text-[#E5E7EB] truncate">{profile.email}</dd>
+                <Mail className="w-4 h-4 shrink-0 text-[#64748B] dark:text-[#94A3B8]" />
+                <dd className="text-[#0F172A] dark:text-[#E2E8F0] truncate">{profile.email}</dd>
               </div>
             )}
             {isOwnProfile && profile.phone && (
               <div className="flex items-center gap-2.5">
-                <Phone className="w-4 h-4 shrink-0 text-[#65676B] dark:text-[#9CA3AF]" />
-                <dd className="text-[#111827] dark:text-[#E5E7EB] tabular-nums">{profile.phone}</dd>
+                <Phone className="w-4 h-4 shrink-0 text-[#64748B] dark:text-[#94A3B8]" />
+                <dd className="text-[#0F172A] dark:text-[#E2E8F0] tabular-nums">{profile.phone}</dd>
+              </div>
+            )}
+            {isOwnProfile && profile.date_of_birth && (
+              <div className="flex items-center gap-2.5">
+                <Calendar className="w-4 h-4 shrink-0 text-[#64748B] dark:text-[#94A3B8]" />
+                <dd className="text-[#0F172A] dark:text-[#E2E8F0] tabular-nums">
+                  Born{' '}
+                  {new Date(`${profile.date_of_birth}T00:00:00`).toLocaleDateString('en-GB', {
+                    day: 'numeric',
+                    month: 'long',
+                    year: 'numeric',
+                  })}
+                </dd>
               </div>
             )}
             <div className="flex items-center gap-2.5">
-              <Calendar className="w-4 h-4 shrink-0 text-[#65676B] dark:text-[#9CA3AF]" />
+              <Calendar className="w-4 h-4 shrink-0 text-[#64748B] dark:text-[#94A3B8]" />
               <dd>
                 Joined{' '}
                 {new Date(profile.created_at).toLocaleDateString(undefined, {
@@ -799,13 +814,24 @@ export function ProfileView({
           </dl>
 
           {isOwnProfile && !isEditing && (
-            <button
-              type="button"
-              onClick={openEditor}
-              className="w-full h-10 rounded-xl bg-[#F0F2F5] dark:bg-[#2A2D32] hover:bg-[#E4E6EB] dark:hover:bg-[#35383E] text-sm font-semibold text-[#111827] dark:text-white transition-colors cursor-pointer"
-            >
-              Edit Bio &amp; Details
-            </button>
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={openEditor}
+                className="w-full h-10 rounded-xl bg-[#F1F5F9] dark:bg-[#222733] hover:bg-[#E2E8F0] dark:hover:bg-[#2D3342] text-sm font-semibold text-[#0F172A] dark:text-white transition-colors cursor-pointer"
+              >
+                Edit Bio &amp; Details
+              </button>
+              {onOpenAccountsCentre && (
+                <button
+                  type="button"
+                  onClick={onOpenAccountsCentre}
+                  className="w-full h-10 rounded-xl border border-[#E5E8EE] dark:border-[#252A34] hover:bg-[#F8FAFC] dark:hover:bg-[#1D222B] text-xs font-semibold text-[#1877F2] dark:text-[#60A5FA] transition-colors cursor-pointer"
+                >
+                  Personal details &amp; Password security
+                </button>
+              )}
+            </div>
           )}
         </aside>
 
