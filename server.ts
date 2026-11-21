@@ -297,6 +297,8 @@ function ensureColumn(table: string, column: string, definition: string) {
 ensureColumn('users', 'date_of_birth', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('sessions', 'device_name', "TEXT NOT NULL DEFAULT 'Web Browser'");
 ensureColumn('sessions', 'ip_address', "TEXT NOT NULL DEFAULT 'Local session'");
+ensureColumn('posts', 'video_url', 'TEXT');
+ensureColumn('post_likes', 'reaction', "TEXT NOT NULL DEFAULT 'like'");
 
 // Security helpers
 function hashPassword(password: string): string {
@@ -325,8 +327,36 @@ function normalizePhone(input: string): string | null {
   const trimmed = input.trim();
   const digits = trimmed.replace(/[^\d+]/g, '');
   const pureDigits = digits.replace(/\+/g, '');
-  if (pureDigits.length < 7 || pureDigits.length > 15) return null;
-  return digits.startsWith('+') ? `+${pureDigits}` : `+${pureDigits}`;
+  if (pureDigits.length < 6 || pureDigits.length > 16) return null;
+  return `+${pureDigits}`;
+}
+
+const VALID_REACTIONS = new Set(['like', 'love', 'care', 'haha', 'wow', 'sad', 'angry']);
+type ReactionKind = 'like' | 'love' | 'care' | 'haha' | 'wow' | 'sad' | 'angry';
+
+function parseReaction(raw: unknown): ReactionKind | null {
+  if (typeof raw !== 'string') return null;
+  const cleaned = raw.trim().toLowerCase();
+  return VALID_REACTIONS.has(cleaned) ? (cleaned as ReactionKind) : null;
+}
+
+function reactionVerb(reaction: ReactionKind): string {
+  switch (reaction) {
+    case 'love':
+      return 'loved';
+    case 'care':
+      return 'sent Care to';
+    case 'haha':
+      return 'laughed at';
+    case 'wow':
+      return 'was amazed by';
+    case 'sad':
+      return 'reacted Sad to';
+    case 'angry':
+      return 'reacted Angry to';
+    default:
+      return 'liked';
+  }
 }
 
 function maskDestination(email: string | null, phone: string | null): string {
@@ -790,7 +820,7 @@ seedCommunityHubs();
 
 // Express setup
 const app = express();
-app.use(express.json({limit: '12mb'}));
+app.use(express.json({limit: '35mb'}));
 app.use('/uploads', express.static(uploadsDir));
 
 // WebSocket hub
@@ -955,17 +985,34 @@ function hydratePosts(postRows: Array<Record<string, unknown>>, viewerId: number
 
   const likesRows = db
     .prepare(
-      `SELECT post_id, COUNT(*) as count,
-              SUM(CASE WHEN user_id = ? THEN 1 ELSE 0 END) as liked_by_me
+      `SELECT post_id, user_id, COALESCE(reaction, 'like') as reaction
        FROM post_likes
-       WHERE post_id IN (${placeholders})
-       GROUP BY post_id`,
+       WHERE post_id IN (${placeholders})`,
     )
-    .all(viewerId, ...postIds) as Array<{post_id: number; count: number; liked_by_me: number}>;
+    .all(...postIds) as Array<{post_id: number; user_id: number; reaction: string}>;
 
-  const likesMap = new Map<number, {count: number; likedByMe: boolean}>();
+  const likesMap = new Map<
+    number,
+    {
+      count: number;
+      likedByMe: boolean;
+      myReaction: ReactionKind | null;
+      reactionCounts: Partial<Record<ReactionKind, number>>;
+    }
+  >();
   for (const row of likesRows) {
-    likesMap.set(row.post_id, {count: row.count, likedByMe: row.liked_by_me > 0});
+    const rType: ReactionKind = parseReaction(row.reaction) || 'like';
+    let entry = likesMap.get(row.post_id);
+    if (!entry) {
+      entry = {count: 0, likedByMe: false, myReaction: null, reactionCounts: {}};
+      likesMap.set(row.post_id, entry);
+    }
+    entry.count += 1;
+    entry.reactionCounts[rType] = (entry.reactionCounts[rType] || 0) + 1;
+    if (row.user_id === viewerId) {
+      entry.likedByMe = true;
+      entry.myReaction = rType;
+    }
   }
 
   const savedRows = db
@@ -978,18 +1025,26 @@ function hydratePosts(postRows: Array<Record<string, unknown>>, viewerId: number
   return postRows.map((p) => {
     const pid = Number(p.id);
     const comments = commentsByPost.get(pid) || [];
-    const likeInfo = likesMap.get(pid) || {count: 0, likedByMe: false};
+    const likeInfo = likesMap.get(pid) || {
+      count: 0,
+      likedByMe: false,
+      myReaction: null,
+      reactionCounts: {},
+    };
     return {
       id: pid,
       user_id: Number(p.user_id),
       content: String(p.content || ''),
       image_url: p.image_url ? String(p.image_url) : null,
+      video_url: p.video_url ? String(p.video_url) : null,
       created_at: String(p.created_at),
       author_name: String(p.author_name),
       author_avatar: String(p.author_avatar || ''),
       author_work: String(p.author_work || ''),
       likes_count: likeInfo.count,
       liked_by_me: likeInfo.likedByMe,
+      my_reaction: likeInfo.myReaction,
+      reaction_counts: likeInfo.reactionCounts,
       saved_by_me: savedSet.has(pid),
       comments_count: comments.length,
       comments,
@@ -1335,33 +1390,109 @@ app.post('/api/auth/reset-password', (req: Request, res: Response) => {
 });
 
 // =======================
-// UPLOAD ROUTE
+// UPLOAD ROUTES (IMAGES & VIDEOS)
 // =======================
+
+const MIME_EXT_MAP: Record<string, {ext: string; mediaType: 'image' | 'video'}> = {
+  'image/png': {ext: 'png', mediaType: 'image'},
+  'image/jpeg': {ext: 'jpg', mediaType: 'image'},
+  'image/jpg': {ext: 'jpg', mediaType: 'image'},
+  'image/webp': {ext: 'webp', mediaType: 'image'},
+  'image/gif': {ext: 'gif', mediaType: 'image'},
+  'image/avif': {ext: 'avif', mediaType: 'image'},
+  'image/bmp': {ext: 'bmp', mediaType: 'image'},
+  'video/mp4': {ext: 'mp4', mediaType: 'video'},
+  'video/webm': {ext: 'webm', mediaType: 'video'},
+  'video/quicktime': {ext: 'mov', mediaType: 'video'},
+  'video/ogg': {ext: 'ogv', mediaType: 'video'},
+  'video/x-m4v': {ext: 'm4v', mediaType: 'video'},
+  'video/3gpp': {ext: '3gp', mediaType: 'video'},
+};
+
+// Raw binary upload for large photos and videos (up to 60 MB, no base64 overhead)
+app.post(
+  '/api/upload/media',
+  requireAuth,
+  express.raw({type: ['image/*', 'video/*', 'application/octet-stream'], limit: '60mb'}),
+  (req: AuthedRequest, res: Response) => {
+    const contentType = String(req.headers['content-type'] || '')
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
+    const fallbackMime = String(req.headers['x-file-mime'] || '')
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
+    const mime = MIME_EXT_MAP[contentType] ? contentType : fallbackMime;
+    const mapped = MIME_EXT_MAP[mime];
+
+    if (!mapped) {
+      res.status(400).json({
+        error: 'Unsupported media format. Please upload JPG, PNG, WEBP, GIF, MP4, WEBM, or MOV.',
+      });
+      return;
+    }
+
+    const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    if (buffer.length === 0) {
+      res.status(400).json({error: 'Uploaded file is empty.'});
+      return;
+    }
+    if (buffer.length > 60 * 1024 * 1024) {
+      res.status(413).json({error: 'File is too large (max 60 MB).'});
+      return;
+    }
+
+    const prefix = mapped.mediaType === 'video' ? 'vid' : 'img';
+    const filename = `${prefix}_${req.user!.id}_${Date.now()}_${crypto.randomBytes(6).toString('hex')}.${mapped.ext}`;
+    fs.writeFileSync(path.join(uploadsDir, filename), buffer);
+
+    res.status(201).json({
+      url: `/uploads/${filename}`,
+      mediaType: mapped.mediaType,
+    });
+  },
+);
 
 app.post('/api/upload', requireAuth, (req: AuthedRequest, res: Response) => {
   const {dataUrl} = req.body as {dataUrl?: string};
   if (!dataUrl || typeof dataUrl !== 'string') {
-    res.status(400).json({error: 'Image data is required.'});
+    res.status(400).json({error: 'Media data is required.'});
     return;
   }
 
-  const match = dataUrl.match(/^data:image\/(png|jpeg|jpg|webp|gif);base64,(.+)$/i);
+  const match = dataUrl.match(/^data:([a-z0-9.+-]+\/[a-z0-9.+-]+);base64,(.+)$/i);
   if (!match) {
-    res.status(400).json({error: 'Unsupported image format. Please upload PNG, JPG, WEBP, or GIF.'});
+    res.status(400).json({error: 'Invalid media payload. Please select a valid photo or video.'});
     return;
   }
 
-  const ext = match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
+  const mime = match[1].toLowerCase();
+  const mapped = MIME_EXT_MAP[mime];
+  if (!mapped) {
+    res.status(400).json({
+      error: 'Unsupported format. Please upload PNG, JPG, WEBP, GIF, MP4, WEBM, or MOV.',
+    });
+    return;
+  }
+
   const buffer = Buffer.from(match[2], 'base64');
-  if (buffer.length > 8 * 1024 * 1024) {
-    res.status(413).json({error: 'Image file is too large (max 8 MB).'});
+  const maxBytes = mapped.mediaType === 'video' ? 30 * 1024 * 1024 : 15 * 1024 * 1024;
+  if (buffer.length > maxBytes) {
+    res.status(413).json({
+      error:
+        mapped.mediaType === 'video'
+          ? 'Video file is too large (max 30 MB via base64).'
+          : 'Image file is too large (max 15 MB).',
+    });
     return;
   }
 
-  const filename = `img_${req.user!.id}_${Date.now()}_${crypto.randomBytes(6).toString('hex')}.${ext}`;
+  const prefix = mapped.mediaType === 'video' ? 'vid' : 'img';
+  const filename = `${prefix}_${req.user!.id}_${Date.now()}_${crypto.randomBytes(6).toString('hex')}.${mapped.ext}`;
   fs.writeFileSync(path.join(uploadsDir, filename), buffer);
 
-  res.status(201).json({url: `/uploads/${filename}`});
+  res.status(201).json({url: `/uploads/${filename}`, mediaType: mapped.mediaType});
 });
 
 // =======================
@@ -1486,19 +1617,26 @@ app.get('/api/posts', requireAuth, (req: AuthedRequest, res: Response) => {
 });
 
 app.post('/api/posts', requireAuth, (req: AuthedRequest, res: Response) => {
-  const {content, image_url} = req.body as {content?: string; image_url?: string | null};
+  const {content, image_url, video_url} = req.body as {
+    content?: string;
+    image_url?: string | null;
+    video_url?: string | null;
+  };
   const trimmed = (content || '').trim();
   const cleanImage = image_url && image_url.trim() ? image_url.trim() : null;
+  const cleanVideo = video_url && video_url.trim() ? video_url.trim() : null;
 
-  if (!trimmed && !cleanImage) {
-    res.status(400).json({error: 'Write something or attach a photo before posting.'});
+  if (!trimmed && !cleanImage && !cleanVideo) {
+    res.status(400).json({error: 'Write something or attach a photo or video before posting.'});
     return;
   }
 
   const now = new Date().toISOString();
   const result = db
-    .prepare('INSERT INTO posts (user_id, content, image_url, created_at) VALUES (?, ?, ?, ?)')
-    .run(req.user!.id, trimmed.slice(0, 2000), cleanImage, now);
+    .prepare(
+      'INSERT INTO posts (user_id, content, image_url, video_url, created_at) VALUES (?, ?, ?, ?, ?)',
+    )
+    .run(req.user!.id, trimmed.slice(0, 2000), cleanImage, cleanVideo, now);
 
   const postId = Number(result.lastInsertRowid);
   const row = db
@@ -1511,7 +1649,7 @@ app.post('/api/posts', requireAuth, (req: AuthedRequest, res: Response) => {
     .get(postId) as Record<string, unknown>;
 
   const hydrated = hydratePosts([row], req.user!.id)[0];
-  broadcastAll('post:created', {...hydrated, liked_by_me: false});
+  broadcastAll('post:created', {...hydrated, liked_by_me: false, my_reaction: null});
 
   res.status(201).json({post: hydrated});
 });
@@ -1544,39 +1682,86 @@ app.post('/api/posts/:id/like', requireAuth, (req: AuthedRequest, res: Response)
     return;
   }
 
+  const requestedReaction = parseReaction((req.body as {reaction?: string} | undefined)?.reaction);
   const existing = db
-    .prepare('SELECT 1 FROM post_likes WHERE post_id = ? AND user_id = ?')
-    .get(postId, req.user!.id);
+    .prepare("SELECT COALESCE(reaction, 'like') as reaction FROM post_likes WHERE post_id = ? AND user_id = ?")
+    .get(postId, req.user!.id) as {reaction: string} | undefined;
 
   let liked = false;
+  let myReaction: ReactionKind | null = null;
+
   if (existing) {
-    db.prepare('DELETE FROM post_likes WHERE post_id = ? AND user_id = ?').run(postId, req.user!.id);
+    const existingKind = parseReaction(existing.reaction) || 'like';
+    if (!requestedReaction || existingKind === requestedReaction) {
+      // Clicking the same reaction again removes it
+      db.prepare('DELETE FROM post_likes WHERE post_id = ? AND user_id = ?').run(
+        postId,
+        req.user!.id,
+      );
+      liked = false;
+      myReaction = null;
+    } else {
+      // Switch to the newly chosen reaction (e.g. Like -> Love / Wow / Sad)
+      db.prepare('UPDATE post_likes SET reaction = ? WHERE post_id = ? AND user_id = ?').run(
+        requestedReaction,
+        postId,
+        req.user!.id,
+      );
+      liked = true;
+      myReaction = requestedReaction;
+    }
   } else {
-    db.prepare('INSERT INTO post_likes (post_id, user_id) VALUES (?, ?)').run(postId, req.user!.id);
+    const chosen: ReactionKind = requestedReaction || 'like';
+    db.prepare('INSERT INTO post_likes (post_id, user_id, reaction) VALUES (?, ?, ?)').run(
+      postId,
+      req.user!.id,
+      chosen,
+    );
     liked = true;
+    myReaction = chosen;
     if (post.user_id !== req.user!.id) {
       createNotification(
         post.user_id,
         req.user!.id,
         'like',
         postId,
-        `${req.user!.name} liked your post.`,
+        `${req.user!.name} ${reactionVerb(chosen)} your post.`,
       );
     }
   }
 
-  const countRow = db
-    .prepare('SELECT COUNT(*) as count FROM post_likes WHERE post_id = ?')
-    .get(postId) as {count: number};
+  const reactionRows = db
+    .prepare(
+      `SELECT COALESCE(reaction, 'like') as reaction, COUNT(*) as count
+       FROM post_likes
+       WHERE post_id = ?
+       GROUP BY COALESCE(reaction, 'like')`,
+    )
+    .all(postId) as Array<{reaction: string; count: number}>;
+
+  const reactionCounts: Partial<Record<ReactionKind, number>> = {};
+  let totalCount = 0;
+  for (const r of reactionRows) {
+    const kind = parseReaction(r.reaction) || 'like';
+    reactionCounts[kind] = (reactionCounts[kind] || 0) + r.count;
+    totalCount += r.count;
+  }
 
   broadcastAll('post:liked', {
     postId,
-    likes_count: countRow.count,
+    likes_count: totalCount,
+    reaction_counts: reactionCounts,
     actorId: req.user!.id,
     liked,
+    my_reaction: myReaction,
   });
 
-  res.json({liked, likes_count: countRow.count});
+  res.json({
+    liked,
+    my_reaction: myReaction,
+    likes_count: totalCount,
+    reaction_counts: reactionCounts,
+  });
 });
 
 app.post('/api/posts/:id/comments', requireAuth, (req: AuthedRequest, res: Response) => {
@@ -2948,6 +3133,18 @@ app.post('/api/security/sessions/revoke-others', requireAuth, (req: AuthedReques
     'security',
   );
   res.json({ok: true, message: 'Signed out of all other devices.'});
+});
+
+// JSON error handler for oversized uploads or malformed bodies on /api routes
+app.use('/api', (err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  const e = err as {type?: string; status?: number; message?: string};
+  if (e?.type === 'entity.too.large' || e?.status === 413) {
+    res.status(413).json({error: 'File is too large. Please upload a smaller photo or video.'});
+    return;
+  }
+  res.status(e?.status || 500).json({
+    error: e?.message || 'Server error while processing your request.',
+  });
 });
 
 // =======================

@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import {apiRequest, uploadImageFile} from '../lib/api';
 import {PRESET_AVATARS, PRESET_COVERS} from '../lib/assets';
-import type {CommentItem, PostItem, UserProfile} from '../types';
+import type {CommentItem, PostItem, ReactionType, UserProfile} from '../types';
 import {Avatar, CoverImage} from './MediaImage';
 import {PostCard} from './PostCard';
 import {PostComposer} from './PostComposer';
@@ -226,15 +226,28 @@ export function ProfileView({
     }
   }
 
-  async function handleToggleLike(postId: number) {
+  async function handleToggleLike(postId: number, reaction?: ReactionType) {
     try {
-      const data = await apiRequest<{liked: boolean; likes_count: number}>(
-        `/api/posts/${postId}/like`,
-        {method: 'POST'},
-      );
+      const data = await apiRequest<{
+        liked: boolean;
+        my_reaction: ReactionType | null;
+        likes_count: number;
+        reaction_counts: Partial<Record<ReactionType, number>>;
+      }>(`/api/posts/${postId}/like`, {
+        method: 'POST',
+        body: JSON.stringify(reaction ? {reaction} : {}),
+      });
       setPosts((prev) =>
         prev.map((p) =>
-          p.id === postId ? {...p, liked_by_me: data.liked, likes_count: data.likes_count} : p,
+          p.id === postId
+            ? {
+                ...p,
+                liked_by_me: data.liked,
+                my_reaction: data.my_reaction,
+                likes_count: data.likes_count,
+                reaction_counts: data.reaction_counts,
+              }
+            : p,
         ),
       );
       onPostMutated();
@@ -856,7 +869,7 @@ export function ProfileView({
               <p className="text-sm font-medium text-[#111827] dark:text-white">No posts yet</p>
               <p className="text-xs text-[#65676B] dark:text-[#9CA3AF] mt-1">
                 {isOwnProfile
-                  ? 'Share your first text or photo post above.'
+                  ? 'Share your first text, photo, or video post above.'
                   : `${profile.name} hasn't shared any posts yet.`}
               </p>
             </div>

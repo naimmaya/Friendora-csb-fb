@@ -28,17 +28,22 @@ export interface CommentItem {
   author_avatar: string;
 }
 
+export type ReactionType = 'like' | 'love' | 'care' | 'haha' | 'wow' | 'sad' | 'angry';
+
 export interface PostItem {
   id: number;
   user_id: number;
   content: string;
   image_url: string | null;
+  video_url?: string | null;
   created_at: string;
   author_name: string;
   author_avatar: string;
   author_work?: string;
   likes_count: number;
   liked_by_me: boolean;
+  my_reaction?: ReactionType | null;
+  reaction_counts?: Partial<Record<ReactionType, number>>;
   saved_by_me?: boolean;
   comments_count: number;
   comments: CommentItem[];

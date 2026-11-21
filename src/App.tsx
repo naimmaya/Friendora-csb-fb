@@ -31,13 +31,13 @@ import {
   ReelsView,
   SavedPostsView,
 } from './components/HubFeaturesView';
-import {Avatar} from './components/MediaImage';
+import {Avatar, CoverImage} from './components/MediaImage';
 import {MenuView} from './components/MenuView';
 import {PostCard} from './components/PostCard';
 import {PostComposer} from './components/PostComposer';
 import {ProfileView} from './components/ProfileView';
 import {SettingsView} from './components/SettingsView';
-import {apiRequest, getAuthToken, setAuthToken} from './lib/api';
+import {apiRequest, getAuthToken, isUsingLocalFallback, setAuthToken} from './lib/api';
 import type {
   AppView,
   AuthView,
@@ -47,6 +47,7 @@ import type {
   NetworkData,
   NotificationItem,
   PostItem,
+  ReactionType,
   SettingsSection,
   UserProfile,
 } from './types';
@@ -334,7 +335,7 @@ export default function App() {
 
     function connect() {
       const token = getAuthToken();
-      if (!token || cancelled) return;
+      if (!token || cancelled || isUsingLocalFallback() || token.startsWith('local_')) return;
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`;
@@ -365,19 +366,27 @@ export default function App() {
               break;
             }
             case 'post:liked': {
-              const {postId, likes_count, actorId, liked} = parsed.payload as {
-                postId: number;
-                likes_count: number;
-                actorId: number;
-                liked: boolean;
-              };
+              const {postId, likes_count, actorId, liked, my_reaction, reaction_counts} =
+                parsed.payload as {
+                  postId: number;
+                  likes_count: number;
+                  actorId: number;
+                  liked: boolean;
+                  my_reaction?: ReactionType | null;
+                  reaction_counts?: Partial<Record<ReactionType, number>>;
+                };
               setPosts((prev) =>
                 prev.map((p) =>
                   p.id === postId
                     ? {
                         ...p,
                         likes_count,
+                        reaction_counts: reaction_counts ?? p.reaction_counts,
                         liked_by_me: actorId === me.id ? liked : p.liked_by_me,
+                        my_reaction:
+                          actorId === me.id
+                            ? (my_reaction ?? (liked ? 'like' : null))
+                            : p.my_reaction,
                       }
                     : p,
                 ),
@@ -495,15 +504,28 @@ export default function App() {
     setAuthView('login');
   }
 
-  async function handleToggleLike(postId: number) {
+  async function handleToggleLike(postId: number, reaction?: ReactionType) {
     try {
-      const data = await apiRequest<{liked: boolean; likes_count: number}>(
-        `/api/posts/${postId}/like`,
-        {method: 'POST'},
-      );
+      const data = await apiRequest<{
+        liked: boolean;
+        my_reaction: ReactionType | null;
+        likes_count: number;
+        reaction_counts: Partial<Record<ReactionType, number>>;
+      }>(`/api/posts/${postId}/like`, {
+        method: 'POST',
+        body: JSON.stringify(reaction ? {reaction} : {}),
+      });
       setPosts((prev) =>
         prev.map((p) =>
-          p.id === postId ? {...p, liked_by_me: data.liked, likes_count: data.likes_count} : p,
+          p.id === postId
+            ? {
+                ...p,
+                liked_by_me: data.liked,
+                my_reaction: data.my_reaction,
+                likes_count: data.likes_count,
+                reaction_counts: data.reaction_counts,
+              }
+            : p,
         ),
       );
     } catch {
@@ -750,11 +772,9 @@ export default function App() {
             <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
               <div className="h-14 w-full bg-[#1E293B] relative overflow-hidden">
                 {currentUser.cover_url && (
-                  <img
+                  <CoverImage
                     src={currentUser.cover_url}
                     alt=""
-                    aria-hidden="true"
-                    referrerPolicy="no-referrer"
                     className="w-full h-full object-cover opacity-90"
                   />
                 )}
@@ -1011,7 +1031,7 @@ export default function App() {
                     <p className="text-sm text-[#65676B] dark:text-[#9CA3AF]">
                       {feedFilter === 'following'
                         ? 'Connect with people in Friends or switch to All Updates.'
-                        : 'Share a status or photo above to start the conversation.'}
+                        : 'Share a status, photo, or video above to start the conversation.'}
                     </p>
                     {feedFilter === 'following' && (
                       <button

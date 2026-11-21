@@ -15,7 +15,6 @@ import {
   Plus,
   Send,
   Store,
-  ThumbsUp,
   UsersRound,
 } from 'lucide-react';
 import {apiRequest, formatRelativeTime} from '../lib/api';
@@ -29,10 +28,12 @@ import type {
   NetworkData,
   PageItem,
   PostItem,
+  ReactionType,
   UserProfile,
 } from '../types';
-import {Avatar, CoverImage} from './MediaImage';
+import {Avatar, CoverImage, useResolvedMediaUrl} from './MediaImage';
 import {PostCard} from './PostCard';
+import {ReactionActionButton} from './ReactionPicker';
 
 function SectionHeader({
   title,
@@ -137,7 +138,7 @@ export function DashboardView({
                 >
                   <div className="min-w-0">
                     <p className="text-sm font-medium text-[#111827] dark:text-white truncate">
-                      {p.content || 'Photo post'}
+                      {p.content || (p.video_url ? 'Video post' : 'Photo post')}
                     </p>
                     <p className="text-xs text-[#65676B] dark:text-[#9CA3AF] tabular-nums mt-0.5">
                       {formatRelativeTime(p.created_at)}
@@ -169,7 +170,7 @@ export function SavedPostsView({
   currentUser: UserProfile;
   onBack: () => void;
   onOpenProfile: (id: number) => void;
-  onToggleLike: (id: number) => void;
+  onToggleLike: (id: number, reaction?: ReactionType) => void;
   onToggleSave: (id: number) => void;
   onCommentAdded: (postId: number, comment: CommentItem) => void;
   onDeletePost: (id: number) => void;
@@ -216,18 +217,47 @@ export function SavedPostsView({
             post={post}
             currentUser={currentUser}
             onOpenProfile={onOpenProfile}
-            onToggleLike={(pid) => {
-              onToggleLike(pid);
+            onToggleLike={(pid, reaction) => {
+              const targetReaction: ReactionType = reaction || 'like';
+              onToggleLike(pid, targetReaction);
               setSavedPosts((prev) =>
-                prev.map((p) =>
-                  p.id === pid
-                    ? {
-                        ...p,
-                        liked_by_me: !p.liked_by_me,
-                        likes_count: p.liked_by_me ? p.likes_count - 1 : p.likes_count + 1,
-                      }
-                    : p,
-                ),
+                prev.map((p) => {
+                  if (p.id !== pid) return p;
+                  const current: ReactionType | null = p.my_reaction || (p.liked_by_me ? 'like' : null);
+                  const counts: Partial<Record<ReactionType, number>> = {...(p.reaction_counts || {})};
+                  if (current === targetReaction) {
+                    const prevCount = counts[current] || 1;
+                    if (prevCount <= 1) delete counts[current];
+                    else counts[current] = prevCount - 1;
+                    return {
+                      ...p,
+                      liked_by_me: false,
+                      my_reaction: null,
+                      likes_count: Math.max(0, p.likes_count - 1),
+                      reaction_counts: counts,
+                    };
+                  }
+                  if (current) {
+                    const prevCount = counts[current] || 1;
+                    if (prevCount <= 1) delete counts[current];
+                    else counts[current] = prevCount - 1;
+                    counts[targetReaction] = (counts[targetReaction] || 0) + 1;
+                    return {
+                      ...p,
+                      liked_by_me: true,
+                      my_reaction: targetReaction,
+                      reaction_counts: counts,
+                    };
+                  }
+                  counts[targetReaction] = (counts[targetReaction] || 0) + 1;
+                  return {
+                    ...p,
+                    liked_by_me: true,
+                    my_reaction: targetReaction,
+                    likes_count: p.likes_count + 1,
+                    reaction_counts: counts,
+                  };
+                }),
               );
             }}
             onToggleSave={(pid) => {
@@ -887,7 +917,79 @@ export function PagesView({onBack}: {onBack: () => void}) {
   );
 }
 
-// 7. REELS (Photo & Visual Highlights Stream)
+// 7. REELS (Video & Photo Visual Highlights Stream)
+function ReelCard({
+  post,
+  onToggleLike,
+  onOpenProfile,
+}: {
+  post: PostItem;
+  onToggleLike: (postId: number, reaction?: ReactionType) => void;
+  onOpenProfile: (id: number) => void;
+}) {
+  const resolvedVideo = useResolvedMediaUrl(post.video_url);
+  const resolvedImage = useResolvedMediaUrl(post.image_url);
+
+  return (
+    <div className="relative aspect-[3/4] rounded-2xl border border-[#E4E6EB] dark:border-[#2E3035] bg-[#0F1115]">
+      <div className="absolute inset-0 rounded-2xl overflow-hidden">
+        {post.video_url ? (
+          resolvedVideo ? (
+            <video
+              src={resolvedVideo}
+              controls
+              playsInline
+              preload="metadata"
+              className="w-full h-full object-cover bg-black"
+            />
+          ) : (
+            <div className="w-full h-full bg-black animate-pulse" />
+          )
+        ) : resolvedImage ? (
+          <img
+            src={resolvedImage}
+            alt={post.content || post.author_name}
+            referrerPolicy="no-referrer"
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          <div className="w-full h-full bg-[#1E293B]" />
+        )}
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-44 bg-gradient-to-t from-black/85 via-black/45 to-transparent" />
+      </div>
+
+      <div className="absolute inset-x-0 bottom-0 p-4 text-white space-y-2 z-10 pointer-events-none">
+        <button
+          type="button"
+          onClick={() => onOpenProfile(post.user_id)}
+          className="flex items-center gap-2 cursor-pointer pointer-events-auto"
+        >
+          <Avatar src={post.author_avatar} name={post.author_name} size="xs" />
+          <span className="text-sm font-semibold hover:underline">{post.author_name}</span>
+        </button>
+        {post.content && (
+          <p className="text-xs text-white/90 line-clamp-2 leading-relaxed">{post.content}</p>
+        )}
+        <div className="flex items-center gap-4 pt-1 text-xs pointer-events-auto">
+          <div className="inline-flex items-center gap-1.5">
+            <ReactionActionButton
+              compact
+              myReaction={post.my_reaction ?? (post.liked_by_me ? 'like' : null)}
+              likedByMe={post.liked_by_me}
+              onReact={(reaction) => onToggleLike(post.id, reaction)}
+            />
+            <span className="tabular-nums text-white/90">{post.likes_count}</span>
+          </div>
+          <span className="inline-flex items-center gap-1.5 tabular-nums text-white/80">
+            <MessageCircle className="w-4 h-4" />
+            <span>{post.comments_count}</span>
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ReelsView({
   posts,
   onBack,
@@ -896,16 +998,16 @@ export function ReelsView({
 }: {
   posts: PostItem[];
   onBack: () => void;
-  onToggleLike: (postId: number) => void;
+  onToggleLike: (postId: number, reaction?: ReactionType) => void;
   onOpenProfile: (id: number) => void;
 }) {
-  const mediaPosts = posts.filter((p) => Boolean(p.image_url));
+  const mediaPosts = posts.filter((p) => Boolean(p.video_url || p.image_url));
 
   return (
     <div className="space-y-4">
       <SectionHeader
         title="Reels & Visual Highlights"
-        subtitle="Full-frame visual stories shared across Verve"
+        subtitle="Full-frame video and photo stories shared across Verve"
         onBack={onBack}
       />
 
@@ -914,50 +1016,18 @@ export function ReelsView({
           <Film className="w-7 h-7 mx-auto text-[#65676B] dark:text-[#9CA3AF]" />
           <p className="text-sm font-semibold text-[#111827] dark:text-white">No visual stories yet</p>
           <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
-            Share a photo post on Home and it will appear in Reels.
+            Share a photo or video post on Home and it will appear in Reels.
           </p>
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {mediaPosts.map((post) => (
-            <div
+            <ReelCard
               key={post.id}
-              className="relative aspect-[3/4] rounded-2xl overflow-hidden border border-[#E4E6EB] dark:border-[#2E3035] bg-[#0F1115]"
-            >
-              <img
-                src={post.image_url!}
-                alt={post.content || post.author_name}
-                referrerPolicy="no-referrer"
-                className="w-full h-full object-cover"
-              />
-              <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/45 to-transparent p-4 text-white space-y-2">
-                <button
-                  type="button"
-                  onClick={() => onOpenProfile(post.user_id)}
-                  className="flex items-center gap-2 cursor-pointer"
-                >
-                  <Avatar src={post.author_avatar} name={post.author_name} size="xs" />
-                  <span className="text-sm font-semibold hover:underline">{post.author_name}</span>
-                </button>
-                {post.content && (
-                  <p className="text-xs text-white/90 line-clamp-2 leading-relaxed">{post.content}</p>
-                )}
-                <div className="flex items-center gap-4 pt-1 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => onToggleLike(post.id)}
-                    className="inline-flex items-center gap-1.5 font-semibold cursor-pointer"
-                  >
-                    <ThumbsUp className={`w-4 h-4 ${post.liked_by_me ? 'fill-current text-[#60A5FA]' : ''}`} />
-                    <span className="tabular-nums">{post.likes_count}</span>
-                  </button>
-                  <span className="inline-flex items-center gap-1.5 tabular-nums text-white/80">
-                    <MessageCircle className="w-4 h-4" />
-                    <span>{post.comments_count}</span>
-                  </span>
-                </div>
-              </div>
-            </div>
+              post={post}
+              onToggleLike={onToggleLike}
+              onOpenProfile={onOpenProfile}
+            />
           ))}
         </div>
       )}
@@ -980,7 +1050,7 @@ export function MemoriesView({
   posts: PostItem[];
   onBack: () => void;
   onOpenProfile: (id: number) => void;
-  onToggleLike: (id: number) => void;
+  onToggleLike: (id: number, reaction?: ReactionType) => void;
   onToggleSave: (id: number) => void;
   onCommentAdded: (postId: number, comment: CommentItem) => void;
   onDeletePost: (id: number) => void;
@@ -1145,7 +1215,7 @@ export function ActivityLogView({onBack}: {onBack: () => void}) {
               </span>
               <div className="min-w-0">
                 <p className="text-sm text-[#111827] dark:text-[#F3F4F6] break-words">
-                  {a.kind === 'post' ? `Posted: "${a.summary || 'Photo update'}"` : a.summary}
+                  {a.kind === 'post' ? `Posted: "${a.summary || 'Photo or video update'}"` : a.summary}
                 </p>
                 <p className="text-xs text-[#65676B] dark:text-[#9CA3AF] mt-0.5 tabular-nums">
                   {formatRelativeTime(a.created_at)}
