@@ -30,6 +30,8 @@ import {
 } from 'lucide-react';
 import {updateVaultPasswordByIdentifier} from '../lib/accountVault';
 import {apiRequest} from '../lib/api';
+import {auth} from '../lib/firebase';
+import {saveUserProfilePermanent} from '../lib/firestoreStore';
 import type {
   ActiveSessionItem,
   LinkedAccountItem,
@@ -577,15 +579,31 @@ export function SettingsView({
     setBusy(true);
     clearFeedback();
     try {
-      const data = await apiRequest<{user: UserProfile; message: string}>(
-        '/api/personal-details/contact',
-        {
-          method: 'PUT',
-          body: JSON.stringify({email: contactEmail, phone: contactPhone}),
-        },
-      );
-      onUserUpdated(data.user);
-      setSaveMessage(data.message);
+      if (auth.currentUser) {
+        const updated = await saveUserProfilePermanent(auth.currentUser, {
+          name: currentUser.name,
+          bio: currentUser.bio || '',
+          work: currentUser.work || '',
+          location: currentUser.location || '',
+          avatar_url: currentUser.avatar_url || '',
+          cover_url: currentUser.cover_url || '',
+          email: contactEmail.trim() || null,
+          phone: contactPhone.trim() || null,
+          date_of_birth: currentUser.date_of_birth || '',
+        });
+        onUserUpdated(updated);
+        setSaveMessage('Contact info saved permanently to Cloud Firestore.');
+      } else {
+        const data = await apiRequest<{user: UserProfile; message: string}>(
+          '/api/personal-details/contact',
+          {
+            method: 'PUT',
+            body: JSON.stringify({email: contactEmail, phone: contactPhone}),
+          },
+        );
+        onUserUpdated(data.user);
+        setSaveMessage(data.message);
+      }
       await refreshSecurityBundle();
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Could not update contact info.');
@@ -599,15 +617,31 @@ export function SettingsView({
     setBusy(true);
     clearFeedback();
     try {
-      const data = await apiRequest<{user: UserProfile; message: string}>(
-        '/api/personal-details/dob',
-        {
-          method: 'PUT',
-          body: JSON.stringify({date_of_birth: dobInput}),
-        },
-      );
-      onUserUpdated(data.user);
-      setSaveMessage(data.message);
+      if (auth.currentUser) {
+        const updated = await saveUserProfilePermanent(auth.currentUser, {
+          name: currentUser.name,
+          bio: currentUser.bio || '',
+          work: currentUser.work || '',
+          location: currentUser.location || '',
+          avatar_url: currentUser.avatar_url || '',
+          cover_url: currentUser.cover_url || '',
+          email: currentUser.email,
+          phone: currentUser.phone,
+          date_of_birth: dobInput.trim(),
+        });
+        onUserUpdated(updated);
+        setSaveMessage('Date of birth saved permanently to Cloud Firestore.');
+      } else {
+        const data = await apiRequest<{user: UserProfile; message: string}>(
+          '/api/personal-details/dob',
+          {
+            method: 'PUT',
+            body: JSON.stringify({date_of_birth: dobInput}),
+          },
+        );
+        onUserUpdated(data.user);
+        setSaveMessage(data.message);
+      }
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Could not update date of birth.');
     } finally {

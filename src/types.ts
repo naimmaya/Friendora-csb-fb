@@ -1,5 +1,6 @@
 export interface UserProfile {
   id: number;
+  uid?: string;
   name: string;
   email: string | null;
   phone: string | null;
@@ -20,9 +21,13 @@ export interface UserProfile {
 
 export interface CommentItem {
   id: number;
+  docId?: string;
   post_id: number;
   user_id: number;
+  author_uid?: string;
   content: string;
+  parent_comment_id?: string | null;
+  reply_to_name?: string | null;
   created_at: string;
   author_name: string;
   author_avatar: string;
@@ -30,12 +35,27 @@ export interface CommentItem {
 
 export type ReactionType = 'like' | 'love' | 'care' | 'haha' | 'wow' | 'sad' | 'angry';
 
+export type PostReportReason =
+  | 'spam'
+  | 'harassment'
+  | 'misinformation'
+  | 'inappropriate'
+  | 'other';
+
 export interface PostItem {
   id: number;
+  docId?: string;
   user_id: number;
+  author_uid?: string;
   content: string;
   image_url: string | null;
   video_url?: string | null;
+  comments_disabled?: boolean;
+  edited?: boolean;
+  page_id?: string | null;
+  page_name?: string | null;
+  page_avatar?: string | null;
+  page_category?: string | null;
   created_at: string;
   author_name: string;
   author_avatar: string;
@@ -51,24 +71,153 @@ export interface PostItem {
 
 export interface NotificationItem {
   id: number;
+  docId?: string;
   user_id: number;
   actor_id: number | null;
+  actor_uid?: string | null;
   actor_name: string | null;
   actor_avatar: string | null;
-  type: 'like' | 'comment' | 'friend_request' | 'friend_accepted' | 'follow' | 'message' | 'welcome';
+  type:
+    | 'like'
+    | 'comment'
+    | 'friend_request'
+    | 'friend_accepted'
+    | 'follow'
+    | 'message'
+    | 'call'
+    | 'welcome';
   entity_id: number | null;
   message: string;
   read: boolean;
   created_at: string;
 }
 
+export type ChatMessageType =
+  | 'text'
+  | 'call'
+  | 'image'
+  | 'video'
+  | 'voice'
+  | 'document'
+  | 'location';
+
 export interface ChatMessage {
   id: number;
+  docId?: string;
   sender_id: number;
   receiver_id: number;
+  sender_uid?: string;
+  receiver_uid?: string;
   content: string;
+  message_type?: ChatMessageType;
+  media_url?: string;
+  media_name?: string;
+  media_size?: number;
+  voice_duration_sec?: number;
+  location_lat?: number;
+  location_lng?: number;
+  location_label?: string;
+  call_type?: '' | 'audio' | 'video';
+  call_status?: '' | 'completed' | 'missed' | 'declined';
+  call_duration_sec?: number;
   read: boolean;
   created_at: string;
+}
+
+export interface PresenceRecord {
+  uid: string;
+  online: boolean;
+  lastSeen: string;
+}
+
+export interface ChatGroupDoc {
+  id: string;
+  name: string;
+  photoUrl: string;
+  creatorUid: string;
+  memberUids: string[];
+  adminUids: string[];
+  lastMessage: string;
+  lastSenderName: string;
+  lastMessageAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GroupChatMessage {
+  id: string;
+  groupId: string;
+  senderUid: string;
+  senderName: string;
+  senderAvatar: string;
+  content: string;
+  messageType: ChatMessageType | 'system';
+  mediaUrl: string;
+  mediaName: string;
+  mediaSize: number;
+  voiceDurationSec: number;
+  locationLat: number;
+  locationLng: number;
+  locationLabel: string;
+  callType: '' | 'audio' | 'video';
+  callDurationSec: number;
+  callJoinedCount: number;
+  createdAt: string;
+}
+
+export interface GroupCallDoc {
+  id: string;
+  groupId: string;
+  groupName: string;
+  groupPhoto: string;
+  hostUid: string;
+  hostName: string;
+  type: CallType;
+  status: 'ringing' | 'active' | 'ended';
+  memberUids: string[];
+  activeUids: string[];
+  joinedUids: string[];
+  durationSec: number;
+  startedAt: string;
+  updatedAt: string;
+}
+
+export interface SocialPageDoc {
+  pageId: string;
+  pageName: string;
+  category: string;
+  pagePhoto: string;
+  coverPhoto: string;
+  bio: string;
+  website: string;
+  whatsapp: string;
+  ownerId: string;
+  adminIds: string[];
+  followers: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CallType = 'audio' | 'video';
+export type CallStatus = 'ringing' | 'accepted' | 'declined' | 'ended' | 'missed';
+
+export interface CallSessionDoc {
+  id: string;
+  callerId: string;
+  callerName: string;
+  callerAvatar: string;
+  receiverId: string;
+  receiverName: string;
+  receiverAvatar: string;
+  participantUids: [string, string];
+  type: CallType;
+  status: CallStatus;
+  offerSdp: string;
+  offerType: '' | 'offer';
+  answerSdp: string;
+  answerType: '' | 'answer';
+  durationSec: number;
+  timestampIso?: string;
 }
 
 export interface ConversationSummary {

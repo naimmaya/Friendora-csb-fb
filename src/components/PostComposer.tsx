@@ -1,23 +1,32 @@
 import {useRef, useState} from 'react';
 import type {ChangeEvent, FormEvent} from 'react';
-import {ImagePlus, Loader2, Send, Video, X} from 'lucide-react';
-import {apiRequest, uploadMediaFile} from '../lib/api';
-import type {PostItem, UserProfile} from '../types';
+import {AlertCircle, CheckCircle2, ImagePlus, Loader2, Send, Video, X} from 'lucide-react';
+import {formatFirestoreErrorMessage} from '../lib/firebase';
+import {createPostPermanent} from '../lib/firestoreStore';
+import {uploadAttachmentReal} from '../lib/mediaUpload';
+import type {PostItem, SocialPageDoc, UserProfile} from '../types';
 import {Avatar, useResolvedMediaUrl} from './MediaImage';
 
 interface PostComposerProps {
   currentUser: UserProfile;
+  postingAsPage?: SocialPageDoc | null;
   onPostCreated: (post: PostItem) => void;
   onOpenProfile: (userId: number) => void;
 }
 
-export function PostComposer({currentUser, onPostCreated, onOpenProfile}: PostComposerProps) {
+export function PostComposer({
+  currentUser,
+  postingAsPage = null,
+  onPostCreated,
+  onOpenProfile,
+}: PostComposerProps) {
   const [content, setContent] = useState('');
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [uploadingKind, setUploadingKind] = useState<'image' | 'video' | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [savedToast, setSavedToast] = useState<string | null>(null);
 
   const photoInputRef = useRef<HTMLInputElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
@@ -27,20 +36,29 @@ export function PostComposer({currentUser, onPostCreated, onOpenProfile}: PostCo
 
   const firstName = currentUser.name.split(' ')[0] || 'there';
   const uploading = uploadingKind !== null;
+  const composerAvatar = postingAsPage ? postingAsPage.pagePhoto : currentUser.avatar_url;
+  const composerName = postingAsPage ? postingAsPage.pageName : currentUser.name;
 
   async function handleFileChange(e: ChangeEvent<HTMLInputElement>, expectedKind: 'image' | 'video') {
     const file = e.target.files?.[0];
     if (!file) return;
     setError(null);
+    setSavedToast(null);
     setUploadingKind(expectedKind);
     try {
-      const uploaded = await uploadMediaFile(file);
-      if (uploaded.mediaType === 'video') {
-        setImageUrl(null);
-        setVideoUrl(uploaded.url);
-      } else {
+      const uploaded = await uploadAttachmentReal(file, {
+        folder: postingAsPage
+          ? `pages/${postingAsPage.pageId}/posts`
+          : `posts/${currentUser.uid || 'user'}`,
+        kind: expectedKind,
+        fileName: file.name,
+      });
+      if (expectedKind === 'image') {
         setVideoUrl(null);
         setImageUrl(uploaded.url);
+      } else {
+        setImageUrl(null);
+        setVideoUrl(uploaded.url);
       }
     } catch (err) {
       setError(
@@ -48,7 +66,7 @@ export function PostComposer({currentUser, onPostCreated, onOpenProfile}: PostCo
           ? err.message
           : expectedKind === 'video'
             ? 'Failed to upload video. Please try a smaller MP4/WEBM file.'
-            : 'Failed to upload photo.',
+            : 'Failed to prepare photo.',
       );
     } finally {
       setUploadingKind(null);
@@ -61,22 +79,27 @@ export function PostComposer({currentUser, onPostCreated, onOpenProfile}: PostCo
     e.preventDefault();
     if (!content.trim() && !imageUrl && !videoUrl) return;
     setError(null);
+    setSavedToast(null);
     setSubmitting(true);
     try {
-      const data = await apiRequest<{post: PostItem}>('/api/posts', {
-        method: 'POST',
-        body: JSON.stringify({
-          content: content.trim(),
-          image_url: imageUrl,
-          video_url: videoUrl,
-        }),
+      const post = await createPostPermanent(currentUser, {
+        content: content.trim(),
+        imageUrl,
+        videoUrl,
+        page: postingAsPage,
       });
       setContent('');
       setImageUrl(null);
       setVideoUrl(null);
-      onPostCreated(data.post);
+      setSavedToast(
+        postingAsPage
+          ? `Published as ${postingAsPage.pageName} to Cloud Firestore.`
+          : 'Post saved permanently to Cloud Firestore.',
+      );
+      window.setTimeout(() => setSavedToast(null), 3500);
+      onPostCreated(post);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not publish post.');
+      setError(formatFirestoreErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -87,13 +110,23 @@ export function PostComposer({currentUser, onPostCreated, onOpenProfile}: PostCo
       onSubmit={handleSubmit}
       className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-4 sm:p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
     >
+      {postingAsPage && (
+        <div className="mb-3 flex items-center justify-between text-xs text-[#64748B] dark:text-[#94A3B8]">
+          <span>
+            Posting as Page:{' '}
+            <strong className="text-[#0F172A] dark:text-white">{postingAsPage.pageName}</strong>
+          </span>
+          <span>Visible in Home Feed</span>
+        </div>
+      )}
+
       <div className="flex items-start gap-3">
         <button
           type="button"
-          onClick={() => onOpenProfile(currentUser.id)}
+          onClick={() => !postingAsPage && onOpenProfile(currentUser.id)}
           className="shrink-0 cursor-pointer rounded-full focus-visible:outline-2 focus-visible:outline-[#1877F2]"
         >
-          <Avatar src={currentUser.avatar_url} name={currentUser.name} size="md" />
+          <Avatar src={composerAvatar} name={composerName} size="md" />
         </button>
 
         <div className="flex-1 min-w-0">
@@ -102,7 +135,11 @@ export function PostComposer({currentUser, onPostCreated, onOpenProfile}: PostCo
             maxLength={2000}
             value={content}
             onChange={(e) => setContent(e.target.value)}
-            placeholder={`What's on your mind, ${firstName}?`}
+            placeholder={
+              postingAsPage
+                ? `Write a post as ${postingAsPage.pageName}...`
+                : `What's on your mind, ${firstName}?`
+            }
             className="w-full resize-none bg-[#F4F6F9] dark:bg-[#0E1014] rounded-xl px-3.5 py-2.5 text-[15px] text-[#0F172A] dark:text-[#F1F5F9] placeholder:text-[#64748B] dark:placeholder:text-[#94A3B8] focus:outline-none focus:ring-2 focus:ring-[#1877F2] dark:focus:ring-[#3B82F6]"
           />
 
@@ -156,14 +193,27 @@ export function PostComposer({currentUser, onPostCreated, onOpenProfile}: PostCo
           )}
 
           {error && (
-            <p role="alert" className="mt-2 text-xs font-medium text-[#DC2626] dark:text-[#F87171]">
-              {error}
-            </p>
+            <div
+              role="alert"
+              className="mt-2.5 flex items-start gap-2 rounded-xl bg-[#FEF2F2] dark:bg-[#3B181A] border border-[#FECACA] dark:border-[#7F1D1D] px-3 py-2 text-xs font-medium text-[#B91C1C] dark:text-[#FCA5A5]"
+            >
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {savedToast && (
+            <div
+              role="status"
+              className="mt-2.5 flex items-center gap-2 rounded-xl bg-[#ECFDF5] dark:bg-[#0F2E22] border border-[#A7F3D0] dark:border-[#166534] px-3 py-2 text-xs font-medium text-[#065F46] dark:text-[#A7F3D0]"
+            >
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-[#16A34A] dark:text-[#4ADE80]" />
+              <span>{savedToast}</span>
+            </div>
           )}
 
           <div className="mt-3 pt-3 border-t border-[#E5E8EE] dark:border-[#252A34] flex items-center justify-between gap-2 flex-wrap">
             <div className="flex items-center gap-1 sm:gap-2">
-              {/* Photo upload */}
               <input
                 ref={photoInputRef}
                 type="file"
@@ -185,7 +235,6 @@ export function PostComposer({currentUser, onPostCreated, onOpenProfile}: PostCo
                 <span>{uploadingKind === 'image' ? 'Uploading...' : 'Photo'}</span>
               </button>
 
-              {/* Video upload */}
               <input
                 ref={videoInputRef}
                 type="file"
@@ -219,8 +268,8 @@ export function PostComposer({currentUser, onPostCreated, onOpenProfile}: PostCo
                 disabled={submitting || uploading || (!content.trim() && !imageUrl && !videoUrl)}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] dark:bg-[#2563EB] dark:hover:bg-[#1D4ED8] text-white text-sm font-semibold transition-all active:scale-[0.985] disabled:opacity-50 whitespace-nowrap cursor-pointer"
               >
-                <Send className="w-4 h-4" />
-                <span>{submitting ? 'Posting...' : 'Post'}</span>
+                {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                <span>{submitting ? 'Saving...' : 'Post'}</span>
               </button>
             </div>
           </div>

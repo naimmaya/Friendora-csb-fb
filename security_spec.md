@@ -1,23 +1,25 @@
-# Firestore Security Specification
+# Verve Security Specification (Firestore Rules TDD)
 
-## Data Invariants
-1. **Default Deny**: All paths outside `/users/{userId}` and `/users/{userId}/private/info` are denied for both reads and writes.
-2. **PII Isolation (Split Collections)**: `/users/{userId}` holds only non-PII public display fields (`name`, `bio`, `location`, `work`, `avatarUrl`, `coverUrl`). All PII (`email`, `phone`, `dateOfBirth`) is isolated in `/users/{userId}/private/info`, readable and writable exclusively by the authenticated owner (`userId == request.auth.uid`).
-3. **Verified Identity Gate**: Writes require an authenticated user whose email is verified (`request.auth.token.email_verified == true`) or whose phone number is verified by Firebase Phone Auth (`request.auth.token.phone_number is string`).
-4. **Immutable Ownership & Timestamps**: `uid` and `createdAt` are immutable after creation; `createdAt` on create and `updatedAt` on update must equal `request.time`.
-5. **Permanent Preservation**: Client-side deletion of `/users/{userId}` and `/users/{userId}/private/info` is forbidden so accounts persist across logouts, refreshes, and redeploys.
-6. **Master Gate Sync**: `/users/{userId}/private/info` requires its parent `/users/{userId}` document to exist (`existsAfter` on create, `exists` on update).
+## 1. Data Invariants
+1. **Verified Identity Gate**: Every read/write across all collections requires a verified Firebase Auth user (`email_verified == true` or verified phone number).
+2. **PII Isolation**: Private contact info (`email`, `phone`, `dateOfBirth`) lives strictly in `/users/{userId}/private/info` and is readable/writable ONLY by `request.auth.uid == userId`.
+3. **Post Ownership, Page Post Authenticity & Comments Gate**: Only `authorUid == request.auth.uid` can create, edit, turn off comments on, or delete `/posts/{postId}`. Creating a Page post (`pageId != ''`) requires `request.auth.uid in get(/pages/{pageId}).data.adminIds`. Creating a comment is rejected if `posts/{postId}.commentsDisabled == true`; creating a reply (`parentCommentId != ''`) requires the parent comment to exist.
+4. **Saved, Hidden & Reported Posts Isolation**: `/saved/{id}`, `/hiddenPosts/{id}`, and `/reports/{id}` are strictly owner-scoped (`userUid == request.auth.uid` or `reporterUid == request.auth.uid`) and require the referenced post to exist on create.
+5. **Messenger Presence, Typing & Rich Media**: Users may only update their own `/presence/{uid}` and `/typingStates/{stateId}`. Direct `/messages/{messageId}` are strictly scoped to `participantUids` (size 2); receivers can only update `read: true`.
+6. **Group Chats & Multi-Party Group Calls**: Only members (`request.auth.uid in memberUids`) can read a `/groups/{groupId}`, send messages in `/groups/{groupId}/messages`, or join `/groupCalls/{callId}`. Only group admins (`request.auth.uid in adminUids`) can rename the group, change its photo, add/remove members, or manage admins; members may only remove themselves to leave.
+7. **Facebook-Style Pages RBAC**: Only the Page `ownerId` can delete a Page or modify `adminIds`. Page `adminIds` can edit Page info and publish Page posts. Non-admin users can ONLY toggle their own UID in `followers` (strictly `+1` or `-1` with all other followers unchanged).
+8. **Temporal Integrity**: All `createdAt`, `updatedAt`, `lastSeen`, `startedAt`, and `timestamp` fields are strictly validated against `request.time`.
 
-## Dirty Dozen Adversarial Payloads (Must Return PERMISSION_DENIED)
-1. **Unauthenticated Write**: Create `/users/user_1` with `request.auth == null`.
-2. **Unverified Email Write**: Create `/users/user_1` with `email_verified: false` and no `phone_number`.
-3. **Identity Spoofing**: Signed in as `user_1`, attempt to create `/users/user_2` or set `uid: "user_2"`.
-4. **Shadow / Ghost Field Injection**: Create `/users/user_1` with extra key `isAdmin: true` or `role: "admin"`.
-5. **Path ID Poisoning**: Create `/users/../../evil$id` or 200-character document ID.
-6. **PII Cross-User Read**: Signed in as `user_2`, attempt `get` on `/users/user_1/private/info`.
-7. **Blanket Collection Scraping**: Signed in as `user_2`, attempt unrestricted `list` on `/users` without `where('uid', '==', 'user_2')`.
-8. **Immutable Field Tampering**: Signed in as `user_1`, update `/users/user_1` modifying `createdAt` or `uid`.
-9. **Client Timestamp Forgery**: Create `/users/user_1` with `createdAt` set to a past timestamp instead of `request.time`.
-10. **Value Poisoning / Size Exhaustion**: Update `/users/user_1` setting `bio` to a 5000-character string or a boolean.
-11. **Orphaned Private Subcollection**: Create `/users/user_1/private/info` when parent `/users/user_1` does not exist.
-12. **Account Deletion Attack**: Signed in as `user_1`, attempt `delete` on `/users/user_1` or `/users/user_1/private/info`.
+## 2. Dirty Dozen Attack Payloads (All Must Return PERMISSION_DENIED)
+1. **Unverified Signup Write**: User with `email_verified: false` attempts to create `/users/{uid}` or `/pages/{pageId}` -> DENIED.
+2. **PII Snooping**: User B attempts `get` on `/users/{uidA}/private/info` -> DENIED.
+3. **Shadow Field Injection**: User A adds `{isAdmin: true}` to `/users/{uidA}`, `/posts/{postId}`, `/groups/{groupId}`, or `/pages/{pageId}` -> DENIED by `hasOnly`.
+4. **Spoofed Page Post**: Non-admin User B tries to create a `/posts/{postId}` with `pageId: pageOwnedByA` -> DENIED by `get(/pages/{pageId}).data.adminIds`.
+5. **Commenting When Comments Turned Off**: User B tries to create `/posts/{postId}/comments/{id}` when `commentsDisabled == true` -> DENIED.
+6. **Cross-User Saved/Hidden Snooping**: User B tries to list or delete User A's `/saved/{id}` or `/hiddenPosts/{id}` -> DENIED.
+7. **Group Chat Intrusion**: Non-member User C tries to read `/groups/{groupId}` or write to `/groups/{groupId}/messages/{id}` -> DENIED.
+8. **Non-Admin Group Hijack**: Regular group member User B tries to change `adminUids` or kick User A from `/groups/{groupId}` -> DENIED.
+9. **Page Follower Tampering**: Non-owner User B tries to erase other users from `/pages/{pageId}.followers` or add User C's UID -> DENIED by exact `±1` self-UID delta check.
+10. **Non-Owner Page Deletion**: Page admin (non-owner) or random user tries to delete `/pages/{pageId}` -> DENIED (`existing().ownerId == request.auth.uid`).
+11. **Terminal Call Re-Opening**: User attempts to update `/calls/{callId}` or `/groupCalls/{callId}` after `status == 'ended'` -> DENIED.
+12. **Client Timestamp Spoofing**: User sends backdated `createdAt`, `updatedAt`, or `startedAt` != `request.time` -> DENIED.

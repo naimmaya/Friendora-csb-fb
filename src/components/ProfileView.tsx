@@ -1,4 +1,4 @@
-import {useEffect, useRef, useState} from 'react';
+import {useEffect, useMemo, useRef, useState} from 'react';
 import type {ChangeEvent, FormEvent} from 'react';
 import {
   AlertCircle,
@@ -7,21 +7,42 @@ import {
   Camera,
   Check,
   CheckCircle2,
+  Flag,
   Loader2,
   Mail,
   MapPin,
   MessageSquare,
   Pencil,
   Phone,
+  Plus,
   Upload,
   UserCheck,
   UserMinus,
   UserPlus,
+  Video,
   X,
 } from 'lucide-react';
-import {apiRequest, uploadImageFile} from '../lib/api';
 import {PRESET_AVATARS, PRESET_COVERS} from '../lib/assets';
-import type {CommentItem, PostItem, ReactionType, UserProfile} from '../types';
+import {auth, formatFirestoreErrorMessage} from '../lib/firebase';
+import {
+  compressImageForFirestore,
+  deletePostPermanent,
+  removeFriendshipPermanent,
+  respondFriendRequestPermanent,
+  saveUserProfilePermanent,
+  sendFriendRequestPermanent,
+  toggleFollowPermanent,
+  toggleReactionPermanent,
+} from '../lib/firestoreStore';
+import type {
+  CallType,
+  CommentItem,
+  NetworkData,
+  PostItem,
+  ReactionType,
+  SocialPageDoc,
+  UserProfile,
+} from '../types';
 import {Avatar, CoverImage} from './MediaImage';
 import {PostCard} from './PostCard';
 import {PostComposer} from './PostComposer';
@@ -29,29 +50,54 @@ import {PostComposer} from './PostComposer';
 interface ProfileViewProps {
   profileId: number;
   currentUser: UserProfile;
+  allUsers: UserProfile[];
+  allPosts: PostItem[];
+  pages?: SocialPageDoc[];
+  network: NetworkData;
   onUserUpdated: (user: UserProfile) => void;
   onOpenProfile: (userId: number) => void;
+  onOpenPage?: (pageId: string) => void;
+  onOpenPagesHub?: () => void;
   onOpenChat: (user: UserProfile) => void;
+  onStartCall?: (peer: UserProfile, type: CallType) => void;
   onOpenAccountsCentre?: () => void;
   onNetworkChanged: () => void;
   onPostMutated: () => void;
+  onPostCreated?: (post: PostItem) => void;
+  onToggleLikePost?: (postId: number, reaction?: ReactionType) => void;
+  onToggleSavePost?: (postId: number) => void;
+  onHidePost?: (post: PostItem) => Promise<void> | void;
+  onToggleFollowAuthor?: (authorUid: string) => Promise<void> | void;
+  onCommentAddedPost?: (postId: number, comment: CommentItem) => void;
+  onCommentDeletedPost?: (postId: number, commentId: number) => void;
+  onDeletePostItem?: (postId: number) => Promise<void> | void;
 }
 
 export function ProfileView({
   profileId,
   currentUser,
+  allUsers,
+  allPosts,
+  pages = [],
+  network,
   onUserUpdated,
   onOpenProfile,
+  onOpenPage,
+  onOpenPagesHub,
   onOpenChat,
+  onStartCall,
   onOpenAccountsCentre,
   onNetworkChanged,
   onPostMutated,
+  onPostCreated,
+  onToggleLikePost,
+  onToggleSavePost,
+  onHidePost,
+  onToggleFollowAuthor,
+  onCommentAddedPost,
+  onCommentDeletedPost,
+  onDeletePostItem,
 }: ProfileViewProps) {
-  const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [posts, setPosts] = useState<PostItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
   // Edit profile state
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState('');
@@ -65,45 +111,70 @@ export function ProfileView({
   const [savingProfile, setSavingProfile] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveConfirmation, setSaveConfirmation] = useState<string | null>(null);
-
   const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const avatarFileRef = useRef<HTMLInputElement>(null);
   const coverFileRef = useRef<HTMLInputElement>(null);
 
+  const [profileTab, setProfileTab] = useState<'posts' | 'pages'>('posts');
   const isOwnProfile = profileId === currentUser.id;
 
-  async function fetchProfile() {
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const data = await apiRequest<{profile: UserProfile; posts: PostItem[]}>(
-        `/api/users/${profileId}`,
-      );
-      setProfile(data.profile);
-      setPosts(data.posts);
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : 'Unable to load profile.');
-    } finally {
-      setLoading(false);
+  const profilePosts = useMemo(
+    () => allPosts.filter((p) => p.user_id === profileId),
+    [allPosts, profileId],
+  );
+
+  const profile: UserProfile | null = useMemo(() => {
+    const base = isOwnProfile
+      ? currentUser
+      : allUsers.find((u) => u.id === profileId) || null;
+    if (!base) return null;
+
+    let friendshipStatus: UserProfile['friendship_status'] = 'none';
+    if (!isOwnProfile) {
+      if (network.friends.some((f) => f.id === base.id)) {
+        friendshipStatus = 'friends';
+      } else if (network.incomingRequests.some((r) => r.id === base.id)) {
+        friendshipStatus = 'incoming_pending';
+      } else if (network.outgoingRequests.some((r) => r.id === base.id)) {
+        friendshipStatus = 'outgoing_pending';
+      }
     }
-  }
+
+    return {
+      ...base,
+      friends_count: isOwnProfile ? network.friends.length : (base.friends_count ?? 0),
+      followers_count: isOwnProfile ? network.followingIds.length : (base.followers_count ?? 0),
+      posts_count: profilePosts.length,
+      friendship_status: friendshipStatus,
+      is_following: network.followingIds.includes(base.id),
+    };
+  }, [isOwnProfile, currentUser, allUsers, profileId, network, profilePosts.length]);
+
+  const profilePages = useMemo(() => {
+    if (!profile?.uid) return [];
+    return pages.filter(
+      (p) => p.ownerId === profile.uid || p.adminIds.includes(profile.uid!),
+    );
+  }, [pages, profile?.uid]);
 
   useEffect(() => {
     setIsEditing(false);
+    setProfileTab('posts');
     setSaveConfirmation(null);
     setSaveError(null);
-    fetchProfile();
+    setActionError(null);
   }, [profileId]);
 
-  function openEditor() {
+  function openEditor(overrides?: {avatarUrl?: string; coverUrl?: string}) {
     if (!profile) return;
     setEditName(profile.name);
     setEditBio(profile.bio);
     setEditWork(profile.work);
     setEditLocation(profile.location);
-    setEditAvatarUrl(profile.avatar_url);
-    setEditCoverUrl(profile.cover_url);
+    setEditAvatarUrl(overrides?.avatarUrl ?? profile.avatar_url);
+    setEditCoverUrl(overrides?.coverUrl ?? profile.cover_url);
     setSaveError(null);
     setIsEditing(true);
   }
@@ -114,15 +185,15 @@ export function ProfileView({
     setSaveError(null);
     setUploadingAvatar(true);
     try {
-      const url = await uploadImageFile(file);
-      setEditAvatarUrl(url);
+      // Compress for permanent storage inside Cloud Firestore
+      const dataUrl = await compressImageForFirestore(file, 'avatar');
       if (!isEditing) {
-        // Open editor with uploaded preview so user can confirm and save cleanly
-        openEditor();
-        setEditAvatarUrl(url);
+        openEditor({avatarUrl: dataUrl});
+      } else {
+        setEditAvatarUrl(dataUrl);
       }
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : 'Failed to upload avatar photo.');
+      setSaveError(err instanceof Error ? err.message : 'Failed to prepare avatar photo.');
     } finally {
       setUploadingAvatar(false);
       if (avatarFileRef.current) avatarFileRef.current.value = '';
@@ -135,14 +206,15 @@ export function ProfileView({
     setSaveError(null);
     setUploadingCover(true);
     try {
-      const url = await uploadImageFile(file);
-      setEditCoverUrl(url);
+      // Compress for permanent storage inside Cloud Firestore
+      const dataUrl = await compressImageForFirestore(file, 'cover');
       if (!isEditing) {
-        openEditor();
-        setEditCoverUrl(url);
+        openEditor({coverUrl: dataUrl});
+      } else {
+        setEditCoverUrl(dataUrl);
       }
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : 'Failed to upload cover photo.');
+      setSaveError(err instanceof Error ? err.message : 'Failed to prepare cover photo.');
     } finally {
       setUploadingCover(false);
       if (coverFileRef.current) coverFileRef.current.value = '';
@@ -152,60 +224,56 @@ export function ProfileView({
   async function handleSaveProfile(e: FormEvent) {
     e.preventDefault();
     setSaveError(null);
+    setSaveConfirmation(null);
+    const fbUser = auth.currentUser;
+    if (!fbUser) {
+      setSaveError('You are not signed in to Firebase. Please sign in again.');
+      return;
+    }
+
     setSavingProfile(true);
     try {
-      const data = await apiRequest<{user: UserProfile; message: string}>('/api/profile', {
-        method: 'PUT',
-        body: JSON.stringify({
-          name: editName.trim(),
-          bio: editBio.trim(),
-          work: editWork.trim(),
-          location: editLocation.trim(),
-          avatar_url: editAvatarUrl.trim(),
-          cover_url: editCoverUrl.trim(),
-        }),
+      // Write to Cloud Firestore FIRST — NEVER fake saved if Firestore fails!
+      const saved = await saveUserProfilePermanent(fbUser, {
+        name: editName.trim(),
+        bio: editBio.trim(),
+        work: editWork.trim(),
+        location: editLocation.trim(),
+        avatar_url: editAvatarUrl.trim(),
+        cover_url: editCoverUrl.trim(),
+        email: currentUser.email,
+        phone: currentUser.phone,
+        date_of_birth: currentUser.date_of_birth,
       });
-      setProfile(data.user);
-      onUserUpdated(data.user);
-      // Sync updated avatar & name on existing posts in this view
-      setPosts((prev) =>
-        prev.map((p) =>
-          p.user_id === data.user.id
-            ? {...p, author_name: data.user.name, author_avatar: data.user.avatar_url, author_work: data.user.work}
-            : p,
-        ),
-      );
+
+      onUserUpdated(saved);
       setIsEditing(false);
       setSaveConfirmation(
-        'Profile saved — your bio, avatar photo, and cover photo have been updated in the database.',
+        'Profile saved permanently to Cloud Firestore — your photo, cover, and bio will stay even after closing and reopening the app.',
       );
       onPostMutated();
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : 'Unable to save profile changes.');
+      setSaveError(formatFirestoreErrorMessage(err));
     } finally {
       setSavingProfile(false);
     }
   }
 
   async function handleFriendAction(action: 'request' | 'accept' | 'decline' | 'remove') {
-    if (!profile || actionBusy) return;
+    if (!profile || actionBusy || !currentUser.uid || !profile.uid) return;
     setActionBusy(true);
+    setActionError(null);
     try {
       if (action === 'request') {
-        await apiRequest('/api/friends/request', {
-          method: 'POST',
-          body: JSON.stringify({userId: profile.id}),
-        });
+        await sendFriendRequestPermanent(currentUser, profile);
       } else if (action === 'accept' || action === 'decline') {
-        await apiRequest('/api/friends/respond', {
-          method: 'POST',
-          body: JSON.stringify({requesterId: profile.id, action}),
-        });
+        await respondFriendRequestPermanent(currentUser, profile, action);
       } else {
-        await apiRequest(`/api/friends/${profile.id}`, {method: 'DELETE'});
+        await removeFriendshipPermanent(currentUser.uid, profile.uid);
       }
-      await fetchProfile();
       onNetworkChanged();
+    } catch (err) {
+      setActionError(formatFirestoreErrorMessage(err));
     } finally {
       setActionBusy(false);
     }
@@ -214,95 +282,72 @@ export function ProfileView({
   async function handleFollowToggle() {
     if (!profile || actionBusy) return;
     setActionBusy(true);
+    setActionError(null);
     try {
-      await apiRequest('/api/follows/toggle', {
-        method: 'POST',
-        body: JSON.stringify({userId: profile.id}),
-      });
-      await fetchProfile();
+      await toggleFollowPermanent(currentUser, profile);
       onNetworkChanged();
+    } catch (err) {
+      setActionError(formatFirestoreErrorMessage(err));
     } finally {
       setActionBusy(false);
     }
   }
 
   async function handleToggleLike(postId: number, reaction?: ReactionType) {
+    if (onToggleLikePost) {
+      onToggleLikePost(postId, reaction);
+      return;
+    }
+    const target = profilePosts.find((p) => p.id === postId);
+    if (!target?.docId) return;
     try {
-      const data = await apiRequest<{
-        liked: boolean;
-        my_reaction: ReactionType | null;
-        likes_count: number;
-        reaction_counts: Partial<Record<ReactionType, number>>;
-      }>(`/api/posts/${postId}/like`, {
-        method: 'POST',
-        body: JSON.stringify(reaction ? {reaction} : {}),
-      });
-      setPosts((prev) =>
-        prev.map((p) =>
-          p.id === postId
-            ? {
-                ...p,
-                liked_by_me: data.liked,
-                my_reaction: data.my_reaction,
-                likes_count: data.likes_count,
-                reaction_counts: data.reaction_counts,
-              }
-            : p,
-        ),
-      );
+      await toggleReactionPermanent(target.docId, currentUser, target.author_uid, reaction || 'like');
       onPostMutated();
-    } catch {
-      // Ignore
+    } catch (err) {
+      setActionError(formatFirestoreErrorMessage(err));
     }
   }
 
   function handleCommentAdded(postId: number, comment: CommentItem) {
-    setPosts((prev) =>
-      prev.map((p) =>
-        p.id === postId
-          ? {
-              ...p,
-              comments: p.comments.some((c) => c.id === comment.id)
-                ? p.comments
-                : [...p.comments, comment],
-              comments_count: p.comments.some((c) => c.id === comment.id)
-                ? p.comments_count
-                : p.comments_count + 1,
-            }
-          : p,
-      ),
-    );
+    if (onCommentAddedPost) {
+      onCommentAddedPost(postId, comment);
+      return;
+    }
+    onPostMutated();
+  }
+
+  function handleCommentDeleted(postId: number, commentId: number) {
+    if (onCommentDeletedPost) {
+      onCommentDeletedPost(postId, commentId);
+      return;
+    }
     onPostMutated();
   }
 
   async function handleDeletePost(postId: number) {
+    if (onDeletePostItem) {
+      await onDeletePostItem(postId);
+      return;
+    }
+    const target = profilePosts.find((p) => p.id === postId);
+    if (!target?.docId) return;
     try {
-      await apiRequest(`/api/posts/${postId}`, {method: 'DELETE'});
-      setPosts((prev) => prev.filter((p) => p.id !== postId));
+      await deletePostPermanent(target.docId, {
+        imageUrl: target.image_url,
+        videoUrl: target.video_url,
+      });
       onPostMutated();
-    } catch {
-      // Ignore
+    } catch (err) {
+      setActionError(formatFirestoreErrorMessage(err));
     }
   }
 
-  if (loading) {
-    return (
-      <div className="space-y-4">
-        <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl overflow-hidden animate-pulse">
-          <div className="h-52 sm:h-64 bg-[#E4E6EB] dark:bg-[#2A2D32]" />
-          <div className="p-6 space-y-3">
-            <div className="w-48 h-6 bg-[#E4E6EB] dark:bg-[#2A2D32] rounded" />
-            <div className="w-80 h-4 bg-[#E4E6EB] dark:bg-[#2A2D32] rounded" />
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (loadError || !profile) {
+  if (!profile) {
     return (
       <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-8 text-center">
-        <p className="text-sm text-[#DC2626] dark:text-[#F87171]">{loadError || 'Profile not found.'}</p>
+        <p className="text-sm text-[#64748B] dark:text-[#94A3B8]">
+          Profile not found yet in Cloud Firestore.
+        </p>
       </div>
     );
   }
@@ -330,6 +375,16 @@ export function ProfileView({
           >
             <X className="w-4 h-4" />
           </button>
+        </div>
+      )}
+
+      {actionError && (
+        <div
+          role="alert"
+          className="flex items-start gap-2.5 p-4 rounded-2xl bg-[#FEF2F2] dark:bg-[#3B181A] border border-[#FECACA] dark:border-[#7F1D1D] text-[#B91C1C] dark:text-[#FCA5A5] text-sm"
+        >
+          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+          <span>{actionError}</span>
         </div>
       )}
 
@@ -368,7 +423,7 @@ export function ProfileView({
               ) : (
                 <Camera className="w-4 h-4" />
               )}
-              <span>{uploadingCover ? 'Uploading...' : 'Edit Cover Photo'}</span>
+              <span>{uploadingCover ? 'Preparing...' : 'Edit Cover Photo'}</span>
             </button>
           )}
         </div>
@@ -414,12 +469,12 @@ export function ProfileView({
                     <strong className="text-[#111827] dark:text-[#F3F4F6] font-semibold">
                       {profile.followers_count ?? 0}
                     </strong>{' '}
-                    followers
+                    following
                   </span>
                   <span aria-hidden="true">·</span>
                   <span>
                     <strong className="text-[#111827] dark:text-[#F3F4F6] font-semibold">
-                      {profile.posts_count ?? posts.length}
+                      {profilePosts.length}
                     </strong>{' '}
                     posts
                   </span>
@@ -428,7 +483,7 @@ export function ProfileView({
             </div>
 
             {/* Action buttons */}
-            <div className="flex items-center gap-2.5 flex-wrap pb-1">
+            <div className="flex items-center gap-2 flex-wrap pb-1">
               {isOwnProfile ? (
                 <button
                   type="button"
@@ -520,6 +575,29 @@ export function ProfileView({
                     <MessageSquare className="w-4 h-4" />
                     <span>Message</span>
                   </button>
+
+                  {onStartCall && profile.uid && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onStartCall(profile, 'audio')}
+                        title="Audio Call"
+                        aria-label={`Audio call ${profile.name}`}
+                        className="w-10 h-10 rounded-xl bg-[#1877F2]/12 hover:bg-[#1877F2]/20 text-[#1877F2] dark:text-[#60A5FA] flex items-center justify-center transition-colors cursor-pointer"
+                      >
+                        <Phone className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onStartCall(profile, 'video')}
+                        title="Video Call"
+                        aria-label={`Video call ${profile.name}`}
+                        className="w-10 h-10 rounded-xl bg-[#1877F2]/12 hover:bg-[#1877F2]/20 text-[#1877F2] dark:text-[#60A5FA] flex items-center justify-center transition-colors cursor-pointer"
+                      >
+                        <Video className="w-4 h-4" />
+                      </button>
+                    </>
+                  )}
                 </>
               )}
             </div>
@@ -529,6 +607,34 @@ export function ProfileView({
             <p className="mt-4 text-[15px] text-[#374151] dark:text-[#D1D5DB] max-w-2xl leading-relaxed">
               {profile.bio}
             </p>
+          )}
+
+          {/* Profile Tabs: Posts | Pages (Facebook-style inside ID) */}
+          {!isEditing && (
+            <div className="mt-5 pt-3 border-t border-[#E5E8EE] dark:border-[#252A34] flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setProfileTab('posts')}
+                className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                  profileTab === 'posts'
+                    ? 'bg-[#1877F2]/12 text-[#1877F2] dark:text-[#60A5FA]'
+                    : 'text-[#64748B] dark:text-[#94A3B8] hover:bg-[#F4F6F9] dark:hover:bg-[#232732]'
+                }`}
+              >
+                Posts ({profilePosts.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setProfileTab('pages')}
+                className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                  profileTab === 'pages'
+                    ? 'bg-[#1877F2]/12 text-[#1877F2] dark:text-[#60A5FA]'
+                    : 'text-[#64748B] dark:text-[#94A3B8] hover:bg-[#F4F6F9] dark:hover:bg-[#232732]'
+                }`}
+              >
+                Pages ({profilePages.length})
+              </button>
+            </div>
           )}
         </div>
 
@@ -544,7 +650,7 @@ export function ProfileView({
                   Edit Profile
                 </h2>
                 <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
-                  Update your bio, avatar photo, and cover photo. Changes are saved to the database.
+                  Changes are written permanently to Cloud Firestore under your account UID.
                 </p>
               </div>
               <button
@@ -599,7 +705,7 @@ export function ProfileView({
                   maxLength={80}
                   value={editLocation}
                   onChange={(e) => setEditLocation(e.target.value)}
-                  placeholder="San Francisco, CA"
+                  placeholder="Dhaka, Bangladesh"
                   className="w-full h-10 px-3.5 rounded-xl bg-white dark:bg-[#121316] border border-[#D1D5DB] dark:border-[#374151] text-sm text-[#111827] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#1877F2]"
                 />
               </div>
@@ -654,7 +760,7 @@ export function ProfileView({
                     Avatar Photo
                   </span>
                   <span className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
-                    Upload an image from your device, choose a preset, or paste an image URL.
+                    Upload from your phone/PC — saved permanently in Cloud Firestore.
                   </span>
                 </div>
                 <button
@@ -664,7 +770,7 @@ export function ProfileView({
                   className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl border border-[#D1D5DB] dark:border-[#374151] bg-white dark:bg-[#1C1E21] text-xs font-semibold text-[#111827] dark:text-white hover:bg-[#F0F2F5] dark:hover:bg-[#2A2D32] cursor-pointer"
                 >
                   <Upload className="w-3.5 h-3.5" />
-                  <span>{uploadingAvatar ? 'Uploading...' : 'Upload Avatar'}</span>
+                  <span>{uploadingAvatar ? 'Preparing...' : 'Upload Avatar'}</span>
                 </button>
               </div>
 
@@ -686,9 +792,13 @@ export function ProfileView({
                 ))}
                 <input
                   type="text"
-                  value={editAvatarUrl}
+                  value={editAvatarUrl.startsWith('data:') ? '' : editAvatarUrl}
                   onChange={(e) => setEditAvatarUrl(e.target.value)}
-                  placeholder="Or paste image URL..."
+                  placeholder={
+                    editAvatarUrl.startsWith('data:')
+                      ? 'Uploaded photo ready (click Save Changes)'
+                      : 'Or paste image URL...'
+                  }
                   className="flex-1 min-w-[200px] h-9 px-3 rounded-xl bg-white dark:bg-[#121316] border border-[#D1D5DB] dark:border-[#374151] text-xs text-[#111827] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#1877F2]"
                 />
               </div>
@@ -702,7 +812,7 @@ export function ProfileView({
                     Cover Photo
                   </span>
                   <span className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
-                    Upload a banner photo, select a preset scene, or paste an image URL.
+                    Upload a banner photo or pick a scene — saved permanently in Cloud Firestore.
                   </span>
                 </div>
                 <button
@@ -712,7 +822,7 @@ export function ProfileView({
                   className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl border border-[#D1D5DB] dark:border-[#374151] bg-white dark:bg-[#1C1E21] text-xs font-semibold text-[#111827] dark:text-white hover:bg-[#F0F2F5] dark:hover:bg-[#2A2D32] cursor-pointer"
                 >
                   <Upload className="w-3.5 h-3.5" />
-                  <span>{uploadingCover ? 'Uploading...' : 'Upload Cover'}</span>
+                  <span>{uploadingCover ? 'Preparing...' : 'Upload Cover'}</span>
                 </button>
               </div>
 
@@ -735,9 +845,13 @@ export function ProfileView({
 
               <input
                 type="text"
-                value={editCoverUrl}
+                value={editCoverUrl.startsWith('data:') ? '' : editCoverUrl}
                 onChange={(e) => setEditCoverUrl(e.target.value)}
-                placeholder="Or paste cover photo URL..."
+                placeholder={
+                  editCoverUrl.startsWith('data:')
+                    ? 'Uploaded cover ready (click Save Changes)'
+                    : 'Or paste cover photo URL...'
+                }
                 className="w-full h-9 px-3 rounded-xl bg-white dark:bg-[#121316] border border-[#D1D5DB] dark:border-[#374151] text-xs text-[#111827] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#1877F2]"
               />
             </div>
@@ -757,7 +871,7 @@ export function ProfileView({
                 className="inline-flex items-center gap-2 px-5 h-10 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] dark:bg-[#2563EB] dark:hover:bg-[#1D4ED8] text-white text-sm font-semibold disabled:opacity-60 transition-colors cursor-pointer"
               >
                 {savingProfile && <Loader2 className="w-4 h-4 animate-spin" />}
-                <span>{savingProfile ? 'Saving...' : 'Save Changes'}</span>
+                <span>{savingProfile ? 'Saving to Firestore...' : 'Save Changes'}</span>
               </button>
             </div>
           </form>
@@ -830,7 +944,7 @@ export function ProfileView({
             <div className="space-y-2">
               <button
                 type="button"
-                onClick={openEditor}
+                onClick={() => openEditor()}
                 className="w-full h-10 rounded-xl bg-[#F1F5F9] dark:bg-[#222733] hover:bg-[#E2E8F0] dark:hover:bg-[#2D3342] text-sm font-semibold text-[#0F172A] dark:text-white transition-colors cursor-pointer"
               >
                 Edit Bio &amp; Details
@@ -848,43 +962,125 @@ export function ProfileView({
           )}
         </aside>
 
-        {/* Right Profile Posts Column */}
+        {/* Right Profile Posts or Pages Column */}
         <div className="lg:col-span-7 space-y-4">
-          {isOwnProfile && (
-            <PostComposer
-              currentUser={currentUser}
-              onOpenProfile={onOpenProfile}
-              onPostCreated={(newPost) => {
-                setPosts((prev) => [newPost, ...prev]);
-                setProfile((prev) =>
-                  prev ? {...prev, posts_count: (prev.posts_count ?? 0) + 1} : prev,
-                );
-                onPostMutated();
-              }}
-            />
-          )}
+          {profileTab === 'pages' ? (
+            <div className="space-y-4">
+              <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-4 sm:p-5 flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="font-display font-bold text-base text-[#0F172A] dark:text-white">
+                    {isOwnProfile ? 'Your Pages' : `${profile.name}'s Pages`}
+                  </h2>
+                  <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
+                    {isOwnProfile
+                      ? 'Create and manage Facebook-style Pages inside your account'
+                      : 'Public Pages managed by this member'}
+                  </p>
+                </div>
+                {isOwnProfile && onOpenPagesHub && (
+                  <button
+                    type="button"
+                    onClick={onOpenPagesHub}
+                    className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] text-white text-xs font-semibold whitespace-nowrap cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Create Page</span>
+                  </button>
+                )}
+              </div>
 
-          {posts.length === 0 ? (
-            <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-8 text-center">
-              <p className="text-sm font-medium text-[#111827] dark:text-white">No posts yet</p>
-              <p className="text-xs text-[#65676B] dark:text-[#9CA3AF] mt-1">
-                {isOwnProfile
-                  ? 'Share your first text, photo, or video post above.'
-                  : `${profile.name} hasn't shared any posts yet.`}
-              </p>
+              {profilePages.length === 0 ? (
+                <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-8 text-center space-y-2.5">
+                  <Flag className="w-7 h-7 mx-auto text-[#1877F2] dark:text-[#60A5FA]" />
+                  <p className="text-sm font-semibold text-[#0F172A] dark:text-white">
+                    No Pages yet
+                  </p>
+                  <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
+                    {isOwnProfile
+                      ? 'Create a Page for your shop, brand, business, or community.'
+                      : `${profile.name} hasn't created any Pages yet.`}
+                  </p>
+                  {isOwnProfile && onOpenPagesHub && (
+                    <button
+                      type="button"
+                      onClick={onOpenPagesHub}
+                      className="inline-flex items-center gap-1.5 px-4 h-9 rounded-xl bg-[#1877F2] text-white text-xs font-semibold cursor-pointer"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Open Pages Hub</span>
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  {profilePages.map((pg) => (
+                    <button
+                      key={pg.pageId}
+                      type="button"
+                      onClick={() => onOpenPage?.(pg.pageId)}
+                      className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl overflow-hidden text-left hover:border-[#1877F2]/50 transition-colors cursor-pointer"
+                    >
+                      <div className="h-20 bg-[#1E293B]">
+                        <CoverImage src={pg.coverPhoto} alt={pg.pageName} />
+                      </div>
+                      <div className="px-4 pb-4 -mt-5 relative z-10">
+                        <div className="rounded-full p-0.5 bg-white dark:bg-[#16191F] w-fit">
+                          <Avatar src={pg.pagePhoto} name={pg.pageName} size="sm" />
+                        </div>
+                        <p className="font-display font-bold text-sm text-[#0F172A] dark:text-white mt-1.5 truncate">
+                          {pg.pageName}
+                        </p>
+                        <p className="text-xs text-[#64748B] dark:text-[#94A3B8] tabular-nums">
+                          {pg.category} · {pg.followers.length} followers
+                        </p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           ) : (
-            posts.map((post) => (
-              <PostCard
-                key={post.id}
-                post={post}
-                currentUser={currentUser}
-                onOpenProfile={onOpenProfile}
-                onToggleLike={handleToggleLike}
-                onCommentAdded={handleCommentAdded}
-                onDeletePost={handleDeletePost}
-              />
-            ))
+            <>
+              {isOwnProfile && (
+                <PostComposer
+                  currentUser={currentUser}
+                  onOpenProfile={onOpenProfile}
+                  onPostCreated={(newPost) => {
+                    onPostCreated?.(newPost);
+                    onPostMutated();
+                  }}
+                />
+              )}
+
+              {profilePosts.length === 0 ? (
+                <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-8 text-center">
+                  <p className="text-sm font-medium text-[#111827] dark:text-white">No posts yet</p>
+                  <p className="text-xs text-[#65676B] dark:text-[#9CA3AF] mt-1">
+                    {isOwnProfile
+                      ? 'Share your first text, photo, or video post above.'
+                      : `${profile.name} hasn't shared any posts yet.`}
+                  </p>
+                </div>
+              ) : (
+                profilePosts.map((post) => (
+                  <PostCard
+                    key={post.id}
+                    post={post}
+                    currentUser={currentUser}
+                    isFollowingAuthor={network.followingIds.includes(post.user_id)}
+                    onOpenProfile={onOpenProfile}
+                    onOpenPage={onOpenPage}
+                    onToggleLike={handleToggleLike}
+                    onToggleSave={onToggleSavePost}
+                    onHidePost={onHidePost}
+                    onToggleFollowAuthor={onToggleFollowAuthor}
+                    onCommentAdded={handleCommentAdded}
+                    onCommentDeleted={handleCommentDeleted}
+                    onDeletePost={handleDeletePost}
+                  />
+                ))
+              )}
+            </>
           )}
         </div>
       </div>

@@ -1,5 +1,4 @@
 import {useEffect, useRef, useState} from 'react';
-import type {FormEvent} from 'react';
 import {
   Bell,
   Check,
@@ -7,12 +6,26 @@ import {
   Heart,
   MessageCircle,
   MessageSquare,
-  Send,
+  Phone,
+  Plus,
   UserPlus,
+  Users,
+  Video,
   X,
 } from 'lucide-react';
 import {formatRelativeTime} from '../lib/api';
-import type {ChatMessage, ConversationSummary, NotificationItem, UserProfile} from '../types';
+import type {
+  CallType,
+  ChatGroupDoc,
+  ChatMessage,
+  ConversationSummary,
+  NotificationItem,
+  PresenceRecord,
+  UserProfile,
+} from '../types';
+import {ChatInputBar, type OutgoingChatPayload} from './ChatInputBar';
+import {ChatMessageBubble} from './ChatMessageBubble';
+import {CreateGroupModal, GroupChatWindow} from './GroupChatComponents';
 import {Avatar} from './MediaImage';
 
 interface RightRailProps {
@@ -179,10 +192,12 @@ interface ChatWindowProps {
   currentUser: UserProfile;
   messages: ChatMessage[];
   isPeerOnline: boolean;
+  peerLastSeen?: string;
   isPeerTyping: boolean;
-  onSendMessage: (peerId: number, content: string) => Promise<void>;
+  onSendMessage: (peerId: number, payload: OutgoingChatPayload) => Promise<void>;
   onTyping: (peerId: number, isTyping: boolean) => void;
   onOpenProfile: (userId: number) => void;
+  onStartCall?: (peer: UserProfile, type: CallType) => void;
   onClose?: () => void;
   compact?: boolean;
 }
@@ -192,50 +207,34 @@ export function ChatConversationWindow({
   currentUser,
   messages,
   isPeerOnline,
+  peerLastSeen,
   isPeerTyping,
   onSendMessage,
   onTyping,
   onOpenProfile,
+  onStartCall,
   onClose,
   compact = false,
 }: ChatWindowProps) {
-  const [draft, setDraft] = useState('');
-  const [sending, setSending] = useState(false);
   const scrollEndRef = useRef<HTMLDivElement>(null);
-  const typingTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     scrollEndRef.current?.scrollIntoView({behavior: 'smooth'});
   }, [messages.length, isPeerTyping]);
 
-  function handleDraftChange(value: string) {
-    setDraft(value);
-    onTyping(peer.id, value.trim().length > 0);
-    if (typingTimerRef.current) window.clearTimeout(typingTimerRef.current);
-    typingTimerRef.current = window.setTimeout(() => {
-      onTyping(peer.id, false);
-    }, 1800);
-  }
-
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    const trimmed = draft.trim();
-    if (!trimmed || sending) return;
-    setSending(true);
-    try {
-      await onSendMessage(peer.id, trimmed);
-      setDraft('');
-      onTyping(peer.id, false);
-    } finally {
-      setSending(false);
-    }
-  }
+  const statusText = isPeerTyping
+    ? 'Typing...'
+    : isPeerOnline
+      ? 'Active now'
+      : peerLastSeen
+        ? `Active ${formatRelativeTime(peerLastSeen)}`
+        : 'Offline';
 
   return (
     <div
       className={`bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] flex flex-col overflow-hidden ${
         compact
-          ? 'w-[340px] h-[440px] rounded-t-2xl shadow-xl shadow-slate-900/10 dark:shadow-black/40'
+          ? 'w-[350px] h-[470px] rounded-t-2xl shadow-xl shadow-slate-900/10 dark:shadow-black/40'
           : 'h-[620px] rounded-2xl shadow-[0_1px_2px_rgba(15,23,42,0.04)]'
       }`}
     >
@@ -251,22 +250,55 @@ export function ChatConversationWindow({
             <span className="font-display font-semibold text-sm text-[#0F172A] dark:text-white truncate block hover:underline">
               {peer.name}
             </span>
-            <span className="text-[11px] text-[#64748B] dark:text-[#94A3B8] block">
-              {isPeerTyping ? 'Typing...' : isPeerOnline ? 'Active now' : 'Offline'}
+            <span
+              className={`text-[11px] block truncate ${
+                isPeerTyping
+                  ? 'text-[#1877F2] dark:text-[#60A5FA] font-semibold'
+                  : isPeerOnline
+                    ? 'text-[#16A34A] dark:text-[#4ADE80]'
+                    : 'text-[#64748B] dark:text-[#94A3B8]'
+              }`}
+            >
+              {statusText}
             </span>
           </div>
         </button>
 
-        {onClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close chat"
-            className="p-1.5 rounded-lg text-[#64748B] dark:text-[#94A3B8] hover:bg-[#F4F6F9] dark:hover:bg-[#232732] cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        )}
+        {/* Messenger-style Audio Call, Video Call & Close icons */}
+        <div className="flex items-center gap-1 shrink-0">
+          {onStartCall && (
+            <>
+              <button
+                type="button"
+                onClick={() => onStartCall(peer, 'audio')}
+                title="Start Audio Call"
+                aria-label={`Audio call ${peer.name}`}
+                className="w-9 h-9 rounded-full text-[#1877F2] dark:text-[#60A5FA] hover:bg-[#1877F2]/10 dark:hover:bg-[#3B82F6]/15 flex items-center justify-center transition-colors cursor-pointer"
+              >
+                <Phone className="w-[18px] h-[18px]" />
+              </button>
+              <button
+                type="button"
+                onClick={() => onStartCall(peer, 'video')}
+                title="Start Video Call"
+                aria-label={`Video call ${peer.name}`}
+                className="w-9 h-9 rounded-full text-[#1877F2] dark:text-[#60A5FA] hover:bg-[#1877F2]/10 dark:hover:bg-[#3B82F6]/15 flex items-center justify-center transition-colors cursor-pointer"
+              >
+                <Video className="w-[19px] h-[19px]" />
+              </button>
+            </>
+          )}
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close chat"
+              className="p-1.5 rounded-lg text-[#64748B] dark:text-[#94A3B8] hover:bg-[#F4F6F9] dark:hover:bg-[#232732] cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Messages body */}
@@ -278,34 +310,39 @@ export function ChatConversationWindow({
               {peer.name}
             </p>
             <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1">
-              Say hello to start a real-time conversation.
+              Send text, emoji, photo, video, voice note, document, location, or start a call.
             </p>
           </div>
         ) : (
-          messages.map((m) => {
-            const mine = m.sender_id === currentUser.id;
-            return (
-              <div key={m.id} className={`flex flex-col ${mine ? 'items-end' : 'items-start'}`}>
-                <div
-                  className={`max-w-[80%] px-3.5 py-2 rounded-2xl text-sm leading-relaxed break-words ${
-                    mine
-                      ? 'bg-[#1877F2] dark:bg-[#2563EB] text-white rounded-br-sm'
-                      : 'bg-white dark:bg-[#1E222B] border border-[#E5E8EE] dark:border-[#252A34] text-[#0F172A] dark:text-[#F1F5F9] rounded-bl-sm'
-                  }`}
-                >
-                  {m.content}
-                </div>
-                <span className="text-[10px] text-[#64748B] dark:text-[#94A3B8] mt-1 px-1 tabular-nums">
-                  {formatRelativeTime(m.created_at)}
-                </span>
-              </div>
-            );
-          })
+          messages.map((m) => (
+            <ChatMessageBubble
+              key={m.id}
+              onCallBack={onStartCall ? (type) => onStartCall(peer, type) : undefined}
+              message={{
+                id: m.id,
+                mine: m.sender_id === currentUser.id,
+                content: m.content,
+                messageType: m.message_type || 'text',
+                mediaUrl: m.media_url,
+                mediaName: m.media_name,
+                mediaSize: m.media_size,
+                voiceDurationSec: m.voice_duration_sec,
+                locationLat: m.location_lat,
+                locationLng: m.location_lng,
+                locationLabel: m.location_label,
+                callType: m.call_type,
+                callStatus: m.call_status,
+                read: m.read,
+                showSeenTick: true,
+                createdAt: m.created_at,
+              }}
+            />
+          ))
         )}
 
         {isPeerTyping && (
           <div className="flex items-start">
-            <div className="px-3.5 py-2 rounded-2xl bg-white dark:bg-[#1E222B] border border-[#E5E8EE] dark:border-[#252A34] text-xs text-[#64748B] dark:text-[#94A3B8]">
+            <div className="px-3.5 py-2 rounded-2xl bg-white dark:bg-[#1E222B] border border-[#E5E8EE] dark:border-[#252A34] text-xs font-medium text-[#1877F2] dark:text-[#60A5FA]">
               {peer.name.split(' ')[0]} is typing...
             </div>
           </div>
@@ -313,142 +350,327 @@ export function ChatConversationWindow({
         <div ref={scrollEndRef} />
       </div>
 
-      {/* Input */}
-      <form
-        onSubmit={handleSubmit}
-        className="p-3 border-t border-[#E5E8EE] dark:border-[#252A34] bg-white dark:bg-[#16191F] flex items-center gap-2 shrink-0"
-      >
-        <input
-          type="text"
-          value={draft}
-          onChange={(e) => handleDraftChange(e.target.value)}
-          placeholder="Type a message..."
-          className="flex-1 h-10 px-3.5 rounded-xl bg-[#F4F6F9] dark:bg-[#0E1014] border border-transparent focus:border-[#1877F2]/40 text-sm text-[#0F172A] dark:text-white placeholder:text-[#64748B] dark:placeholder:text-[#94A3B8] focus:outline-none focus:ring-2 focus:ring-[#1877F2]/30"
-        />
-        <button
-          type="submit"
-          disabled={!draft.trim() || sending}
-          aria-label="Send message"
-          className="w-10 h-10 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] dark:bg-[#2563EB] text-white flex items-center justify-center disabled:opacity-45 active:scale-[0.97] transition-all shrink-0 cursor-pointer"
-        >
-          <Send className="w-4 h-4" />
-        </button>
-      </form>
+      {/* Messenger-style Input: [Emoji] [Message] [Attach] [Camera] [Mic/Send] */}
+      <ChatInputBar
+        uploadFolder={`direct_chats/${currentUser.uid || 'user'}`}
+        placeholder="Message..."
+        compact={compact}
+        onSend={(payload) => onSendMessage(peer.id, payload)}
+        onTypingChange={(typing) => onTyping(peer.id, typing)}
+      />
     </div>
   );
 }
 
 interface MessagesPageProps {
   currentUser: UserProfile;
+  allUsers: UserProfile[];
+  friends: UserProfile[];
   conversations: ConversationSummary[];
+  groups: ChatGroupDoc[];
   activePeer: UserProfile | null;
+  activeGroupId: string | null;
   messagesByPeer: Record<number, ChatMessage[]>;
   onlineUserIds: number[];
+  presenceByUid: Record<string, PresenceRecord>;
   typingUsers: Record<number, boolean>;
   onSelectPeer: (peer: UserProfile) => void;
-  onSendMessage: (peerId: number, content: string) => Promise<void>;
+  onSelectGroup: (groupId: string | null) => void;
+  onSendMessage: (peerId: number, payload: OutgoingChatPayload) => Promise<void>;
   onTyping: (peerId: number, isTyping: boolean) => void;
   onOpenProfile: (userId: number) => void;
+  onStartCall?: (peer: UserProfile, type: CallType) => void;
+  onStartGroupCall: (group: ChatGroupDoc, type: CallType) => void;
+  initialListMode?: 'direct' | 'groups';
 }
 
 export function MessagesPage({
   currentUser,
+  allUsers,
+  friends,
   conversations,
+  groups,
   activePeer,
+  activeGroupId,
   messagesByPeer,
   onlineUserIds,
+  presenceByUid,
   typingUsers,
   onSelectPeer,
+  onSelectGroup,
   onSendMessage,
   onTyping,
   onOpenProfile,
+  onStartCall,
+  onStartGroupCall,
+  initialListMode,
 }: MessagesPageProps) {
+  const [listMode, setListMode] = useState<'direct' | 'groups'>(
+    initialListMode || (activeGroupId ? 'groups' : 'direct'),
+  );
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+
+  useEffect(() => {
+    if (initialListMode) {
+      setListMode(initialListMode);
+    }
+  }, [initialListMode]);
+
   const onlineSet = new Set(onlineUserIds);
   const selectedPeer = activePeer || conversations[0]?.user || null;
+  const selectedGroup = groups.find((g) => g.id === activeGroupId) || groups[0] || null;
+
+  // Prefer friends first when picking members for a new group, then other verified users
+  const groupCandidates = [
+    ...friends,
+    ...allUsers.filter((u) => !friends.some((f) => f.uid === u.uid)),
+  ];
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-start">
-      {/* Contacts Column */}
-      <div className="md:col-span-5 bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl overflow-hidden">
-        <div className="px-4 py-3.5 border-b border-[#E5E8EE] dark:border-[#252A34]">
-          <h1 className="text-lg font-display font-bold text-[#0F172A] dark:text-white">
-            Messages
-          </h1>
-          <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
-            Real-time conversations with friends and community members
-          </p>
-        </div>
+    <>
+      <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-start">
+        {/* Contacts & Groups Column */}
+        <div className="md:col-span-5 bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl overflow-hidden">
+          <div className="px-4 py-3.5 border-b border-[#E5E8EE] dark:border-[#252A34] space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <h1 className="text-lg font-display font-bold text-[#0F172A] dark:text-white">
+                  Messenger
+                </h1>
+                <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
+                  Direct chats, groups, voice notes &amp; live calls
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCreateGroup(true)}
+                className="inline-flex items-center gap-1.5 px-3 h-9 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] text-white text-xs font-semibold whitespace-nowrap cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>New Group</span>
+              </button>
+            </div>
 
-        <div className="divide-y divide-[#E5E8EE] dark:divide-[#252A34] max-h-[540px] overflow-y-auto">
-          {conversations.length === 0 ? (
-            <div className="p-6 text-center text-sm text-[#64748B] dark:text-[#94A3B8]">
-              No conversations yet.
+            {/* Direct | Groups Switcher */}
+            <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-[#F4F6F9] dark:bg-[#0E1014]">
+              <button
+                type="button"
+                onClick={() => {
+                  setListMode('direct');
+                  onSelectGroup(null);
+                }}
+                className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                  listMode === 'direct'
+                    ? 'bg-white dark:bg-[#232732] text-[#0F172A] dark:text-white shadow-xs'
+                    : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F172A] dark:hover:text-white'
+                }`}
+              >
+                Direct ({conversations.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setListMode('groups');
+                  if (!activeGroupId && groups[0]) {
+                    onSelectGroup(groups[0].id);
+                  }
+                }}
+                className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                  listMode === 'groups'
+                    ? 'bg-white dark:bg-[#232732] text-[#0F172A] dark:text-white shadow-xs'
+                    : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F172A] dark:hover:text-white'
+                }`}
+              >
+                Groups ({groups.length})
+              </button>
+            </div>
+          </div>
+
+          {listMode === 'direct' ? (
+            <div className="divide-y divide-[#E5E8EE] dark:divide-[#252A34] max-h-[500px] overflow-y-auto">
+              {conversations.length === 0 ? (
+                <div className="p-6 text-center text-sm text-[#64748B] dark:text-[#94A3B8]">
+                  No conversations yet.
+                </div>
+              ) : (
+                conversations.map((conv) => {
+                  const isActive = !activeGroupId && selectedPeer?.id === conv.user.id;
+                  const isTyping = Boolean(typingUsers[conv.user.id]);
+                  return (
+                    <button
+                      key={conv.user.id}
+                      type="button"
+                      onClick={() => {
+                        onSelectGroup(null);
+                        onSelectPeer(conv.user);
+                      }}
+                      className={`w-full px-4 py-3.5 flex items-center gap-3 text-left transition-colors cursor-pointer ${
+                        isActive
+                          ? 'bg-[#1877F2]/8 dark:bg-[#3B82F6]/15'
+                          : 'hover:bg-[#F8FAFC] dark:hover:bg-[#1E222B]'
+                      }`}
+                    >
+                      <Avatar
+                        src={conv.user.avatar_url}
+                        name={conv.user.name}
+                        size="md"
+                        online={onlineSet.has(conv.user.id)}
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-sm font-semibold text-[#0F172A] dark:text-white truncate">
+                            {conv.user.name}
+                          </span>
+                          {conv.last_message_at && (
+                            <span className="text-[11px] text-[#64748B] dark:text-[#94A3B8] tabular-nums shrink-0">
+                              {formatRelativeTime(conv.last_message_at)}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center justify-between gap-2 mt-0.5">
+                          <p
+                            className={`text-xs truncate ${
+                              isTyping
+                                ? 'text-[#1877F2] dark:text-[#60A5FA] font-semibold'
+                                : 'text-[#64748B] dark:text-[#94A3B8]'
+                            }`}
+                          >
+                            {isTyping ? 'Typing...' : conv.last_message || 'Start chatting'}
+                          </p>
+                          {conv.unread_count > 0 && (
+                            <span className="text-[11px] font-bold text-[#1877F2] dark:text-[#60A5FA] tabular-nums shrink-0">
+                              {conv.unread_count}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })
+              )}
             </div>
           ) : (
-            conversations.map((conv) => {
-              const isActive = selectedPeer?.id === conv.user.id;
-              return (
+            <div className="divide-y divide-[#E5E8EE] dark:divide-[#252A34] max-h-[500px] overflow-y-auto">
+              {groups.length === 0 ? (
+                <div className="p-8 text-center space-y-3">
+                  <Users className="w-8 h-8 mx-auto text-[#64748B] dark:text-[#94A3B8]" />
+                  <p className="text-sm font-semibold text-[#0F172A] dark:text-white">
+                    No group chats yet
+                  </p>
+                  <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
+                    Create a group with your friends for real-time group chat and group video calls.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setShowCreateGroup(true)}
+                    className="inline-flex items-center gap-1.5 px-4 h-9 rounded-xl bg-[#1877F2] text-white text-xs font-semibold cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Create Group</span>
+                  </button>
+                </div>
+              ) : (
+                groups.map((grp) => {
+                  const isActive = activeGroupId === grp.id || (listMode === 'groups' && selectedGroup?.id === grp.id);
+                  return (
+                    <button
+                      key={grp.id}
+                      type="button"
+                      onClick={() => onSelectGroup(grp.id)}
+                      className={`w-full px-4 py-3.5 flex items-center gap-3 text-left transition-colors cursor-pointer ${
+                        isActive
+                          ? 'bg-[#1877F2]/8 dark:bg-[#3B82F6]/15'
+                          : 'hover:bg-[#F8FAFC] dark:hover:bg-[#1E222B]'
+                      }`}
+                    >
+                      <Avatar src={grp.photoUrl} name={grp.name} size="md" />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-sm font-semibold text-[#0F172A] dark:text-white truncate">
+                            {grp.name}
+                          </span>
+                          <span className="text-[11px] text-[#64748B] dark:text-[#94A3B8] tabular-nums shrink-0">
+                            {formatRelativeTime(grp.lastMessageAt)}
+                          </span>
+                        </div>
+                        <p className="text-xs text-[#64748B] dark:text-[#94A3B8] truncate mt-0.5">
+                          {grp.lastMessage || `${grp.memberUids.length} members`}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Active Conversation or Active Group */}
+        <div className="md:col-span-7">
+          {listMode === 'groups' ? (
+            selectedGroup ? (
+              <GroupChatWindow
+                group={selectedGroup}
+                currentUser={currentUser}
+                allUsers={allUsers}
+                onStartGroupCall={onStartGroupCall}
+                onGroupLeftOrDeleted={() => onSelectGroup(null)}
+              />
+            ) : (
+              <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-10 text-center space-y-3">
+                <Users className="w-8 h-8 mx-auto text-[#64748B] dark:text-[#94A3B8]" />
+                <p className="text-sm font-semibold text-[#0F172A] dark:text-white">
+                  Select or create a group
+                </p>
                 <button
-                  key={conv.user.id}
                   type="button"
-                  onClick={() => onSelectPeer(conv.user)}
-                  className={`w-full px-4 py-3.5 flex items-center gap-3 text-left transition-colors cursor-pointer ${
-                    isActive
-                      ? 'bg-[#1877F2]/8 dark:bg-[#3B82F6]/15'
-                      : 'hover:bg-[#F8FAFC] dark:hover:bg-[#1E222B]'
-                  }`}
+                  onClick={() => setShowCreateGroup(true)}
+                  className="inline-flex items-center gap-1.5 px-4 h-9 rounded-xl bg-[#1877F2] text-white text-xs font-semibold cursor-pointer"
                 >
-                  <Avatar
-                    src={conv.user.avatar_url}
-                    name={conv.user.name}
-                    size="md"
-                    online={onlineSet.has(conv.user.id)}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-semibold text-[#0F172A] dark:text-white truncate">
-                        {conv.user.name}
-                      </span>
-                      {conv.last_message_at && (
-                        <span className="text-[11px] text-[#64748B] dark:text-[#94A3B8] tabular-nums">
-                          {formatRelativeTime(conv.last_message_at)}
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-[#64748B] dark:text-[#94A3B8] truncate mt-0.5">
-                      {conv.last_message || 'Start chatting'}
-                    </p>
-                  </div>
+                  <Plus className="w-4 h-4" />
+                  <span>Create Group</span>
                 </button>
-              );
-            })
+              </div>
+            )
+          ) : selectedPeer ? (
+            <ChatConversationWindow
+              peer={selectedPeer}
+              currentUser={currentUser}
+              messages={messagesByPeer[selectedPeer.id] || []}
+              isPeerOnline={onlineSet.has(selectedPeer.id)}
+              peerLastSeen={
+                selectedPeer.uid ? presenceByUid[selectedPeer.uid]?.lastSeen : undefined
+              }
+              isPeerTyping={Boolean(typingUsers[selectedPeer.id])}
+              onSendMessage={onSendMessage}
+              onTyping={onTyping}
+              onOpenProfile={onOpenProfile}
+              onStartCall={onStartCall}
+            />
+          ) : (
+            <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl p-10 text-center">
+              <MessageSquare className="w-8 h-8 mx-auto text-[#64748B] dark:text-[#94A3B8]" />
+              <p className="text-sm font-medium text-[#0F172A] dark:text-white mt-3">
+                Select a conversation
+              </p>
+            </div>
           )}
         </div>
       </div>
 
-      {/* Active Conversation */}
-      <div className="md:col-span-7">
-        {selectedPeer ? (
-          <ChatConversationWindow
-            peer={selectedPeer}
-            currentUser={currentUser}
-            messages={messagesByPeer[selectedPeer.id] || []}
-            isPeerOnline={onlineSet.has(selectedPeer.id)}
-            isPeerTyping={Boolean(typingUsers[selectedPeer.id])}
-            onSendMessage={onSendMessage}
-            onTyping={onTyping}
-            onOpenProfile={onOpenProfile}
-          />
-        ) : (
-          <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl p-10 text-center">
-            <MessageSquare className="w-8 h-8 mx-auto text-[#64748B] dark:text-[#94A3B8]" />
-            <p className="text-sm font-medium text-[#0F172A] dark:text-white mt-3">
-              Select a conversation
-            </p>
-          </div>
-        )}
-      </div>
-    </div>
+      {showCreateGroup && (
+        <CreateGroupModal
+          currentUser={currentUser}
+          candidates={groupCandidates}
+          onClose={() => setShowCreateGroup(false)}
+          onCreated={(created) => {
+            setShowCreateGroup(false);
+            setListMode('groups');
+            onSelectGroup(created.id);
+          }}
+        />
+      )}
+    </>
   );
 }
 

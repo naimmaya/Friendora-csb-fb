@@ -1,29 +1,52 @@
 import {useMemo, useState} from 'react';
-import {Check, MessageSquare, Search, UserCheck, UserMinus, UserPlus, X} from 'lucide-react';
-import {apiRequest, formatRelativeTime} from '../lib/api';
-import type {NetworkData, UserProfile} from '../types';
+import {
+  AlertCircle,
+  Check,
+  MessageSquare,
+  Phone,
+  Search,
+  UserCheck,
+  UserMinus,
+  UserPlus,
+  Video,
+  X,
+} from 'lucide-react';
+import {formatRelativeTime} from '../lib/api';
+import {formatFirestoreErrorMessage} from '../lib/firebase';
+import {
+  removeFriendshipPermanent,
+  respondFriendRequestPermanent,
+  sendFriendRequestPermanent,
+  toggleFollowPermanent,
+} from '../lib/firestoreStore';
+import type {CallType, NetworkData, UserProfile} from '../types';
 import {Avatar} from './MediaImage';
 
 interface FriendsViewProps {
+  currentUser: UserProfile;
   network: NetworkData;
   onlineUserIds: number[];
   onRefresh: () => void;
   onOpenProfile: (userId: number) => void;
   onOpenChat: (user: UserProfile) => void;
+  onStartCall?: (peer: UserProfile, type: CallType) => void;
 }
 
 export function FriendsView({
+  currentUser,
   network,
   onlineUserIds,
   onRefresh,
   onOpenProfile,
   onOpenChat,
+  onStartCall,
 }: FriendsViewProps) {
   const [tab, setTab] = useState<'requests' | 'friends' | 'discover'>(
     network.incomingRequests.length > 0 ? 'requests' : 'discover',
   );
   const [search, setSearch] = useState('');
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const followingSet = useMemo(() => new Set(network.followingIds), [network.followingIds]);
   const onlineSet = useMemo(() => new Set(onlineUserIds), [onlineUserIds]);
@@ -46,50 +69,54 @@ export function FriendsView({
       u.bio.toLowerCase().includes(query),
   );
 
-  async function handleRespond(requesterId: number, action: 'accept' | 'decline') {
-    setBusyId(requesterId);
+  async function handleRespond(requester: UserProfile, action: 'accept' | 'decline') {
+    setBusyId(requester.id);
+    setActionError(null);
     try {
-      await apiRequest('/api/friends/respond', {
-        method: 'POST',
-        body: JSON.stringify({requesterId, action}),
-      });
+      await respondFriendRequestPermanent(currentUser, requester, action);
       onRefresh();
+    } catch (err) {
+      setActionError(formatFirestoreErrorMessage(err));
     } finally {
       setBusyId(null);
     }
   }
 
-  async function handleSendRequest(userId: number) {
-    setBusyId(userId);
+  async function handleSendRequest(target: UserProfile) {
+    setBusyId(target.id);
+    setActionError(null);
     try {
-      await apiRequest('/api/friends/request', {
-        method: 'POST',
-        body: JSON.stringify({userId}),
-      });
+      await sendFriendRequestPermanent(currentUser, target);
       onRefresh();
+    } catch (err) {
+      setActionError(formatFirestoreErrorMessage(err));
     } finally {
       setBusyId(null);
     }
   }
 
-  async function handleRemoveOrCancel(userId: number) {
-    setBusyId(userId);
+  async function handleRemoveOrCancel(target: UserProfile) {
+    if (!currentUser.uid || !target.uid) return;
+    setBusyId(target.id);
+    setActionError(null);
     try {
-      await apiRequest(`/api/friends/${userId}`, {method: 'DELETE'});
+      await removeFriendshipPermanent(currentUser.uid, target.uid);
       onRefresh();
+    } catch (err) {
+      setActionError(formatFirestoreErrorMessage(err));
     } finally {
       setBusyId(null);
     }
   }
 
-  async function handleToggleFollow(userId: number) {
-    setBusyId(userId);
+  async function handleToggleFollow(target: UserProfile) {
+    setBusyId(target.id);
+    setActionError(null);
     try {
-      await apiRequest('/api/follows/toggle', {
-        method: 'POST',
-        body: JSON.stringify({userId}),
-      });
+      await toggleFollowPermanent(currentUser, target);
       onRefresh();
+    } catch (err) {
+      setActionError(formatFirestoreErrorMessage(err));
     } finally {
       setBusyId(null);
     }
@@ -121,6 +148,16 @@ export function FriendsView({
             />
           </div>
         </div>
+
+        {actionError && (
+          <div
+            role="alert"
+            className="flex items-start gap-2 rounded-xl bg-[#FEF2F2] dark:bg-[#3B181A] border border-[#FECACA] dark:border-[#7F1D1D] px-3.5 py-2.5 text-xs font-medium text-[#B91C1C] dark:text-[#FCA5A5]"
+          >
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>{actionError}</span>
+          </div>
+        )}
 
         <div className="flex items-center gap-1 p-1 rounded-xl bg-[#F0F2F5] dark:bg-[#121316] w-fit max-w-full overflow-x-auto">
           <button
@@ -211,7 +248,7 @@ export function FriendsView({
                     <button
                       type="button"
                       disabled={busyId === reqUser.id}
-                      onClick={() => handleRespond(reqUser.id, 'accept')}
+                      onClick={() => handleRespond(reqUser, 'accept')}
                       className="inline-flex items-center gap-1.5 px-4 h-10 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] text-white text-sm font-semibold transition-colors cursor-pointer"
                     >
                       <Check className="w-4 h-4" />
@@ -220,7 +257,7 @@ export function FriendsView({
                     <button
                       type="button"
                       disabled={busyId === reqUser.id}
-                      onClick={() => handleRespond(reqUser.id, 'decline')}
+                      onClick={() => handleRespond(reqUser, 'decline')}
                       className="inline-flex items-center gap-1.5 px-4 h-10 rounded-xl bg-[#F0F2F5] dark:bg-[#2A2D32] hover:bg-[#E4E6EB] dark:hover:bg-[#35383E] text-[#111827] dark:text-white text-sm font-semibold transition-colors cursor-pointer"
                     >
                       <X className="w-4 h-4" />
@@ -266,7 +303,7 @@ export function FriendsView({
                   <button
                     type="button"
                     disabled={busyId === u.id}
-                    onClick={() => handleRemoveOrCancel(u.id)}
+                    onClick={() => handleRemoveOrCancel(u)}
                     className="px-3.5 h-9 rounded-xl border border-[#D1D5DB] dark:border-[#374151] text-xs font-semibold text-[#374151] dark:text-[#D1D5DB] hover:bg-[#F0F2F5] dark:hover:bg-[#2A2D32] cursor-pointer"
                   >
                     Cancel Request
@@ -327,7 +364,29 @@ export function FriendsView({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                  {onStartCall && friend.uid && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onStartCall(friend, 'audio')}
+                        title="Audio Call"
+                        aria-label={`Audio call ${friend.name}`}
+                        className="w-9 h-9 rounded-xl bg-[#1877F2]/10 hover:bg-[#1877F2]/20 text-[#1877F2] dark:text-[#60A5FA] flex items-center justify-center transition-colors cursor-pointer"
+                      >
+                        <Phone className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onStartCall(friend, 'video')}
+                        title="Video Call"
+                        aria-label={`Video call ${friend.name}`}
+                        className="w-9 h-9 rounded-xl bg-[#1877F2]/10 hover:bg-[#1877F2]/20 text-[#1877F2] dark:text-[#60A5FA] flex items-center justify-center transition-colors cursor-pointer"
+                      >
+                        <Video className="w-4 h-4" />
+                      </button>
+                    </>
+                  )}
                   <button
                     type="button"
                     onClick={() => onOpenChat(friend)}
@@ -339,7 +398,7 @@ export function FriendsView({
                   <button
                     type="button"
                     disabled={busyId === friend.id}
-                    onClick={() => handleRemoveOrCancel(friend.id)}
+                    onClick={() => handleRemoveOrCancel(friend)}
                     className="inline-flex items-center gap-1.5 px-3 h-9 rounded-xl border border-[#D1D5DB] dark:border-[#374151] text-xs font-semibold text-[#374151] dark:text-[#D1D5DB] hover:bg-[#F0F2F5] dark:hover:bg-[#2A2D32] cursor-pointer"
                   >
                     <UserMinus className="w-3.5 h-3.5" />
@@ -405,7 +464,7 @@ export function FriendsView({
                     <button
                       type="button"
                       disabled={busyId === person.id}
-                      onClick={() => handleSendRequest(person.id)}
+                      onClick={() => handleSendRequest(person)}
                       className="flex-1 inline-flex items-center justify-center gap-1.5 h-9 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] text-white text-xs font-semibold transition-colors cursor-pointer"
                     >
                       <UserPlus className="w-3.5 h-3.5" />
@@ -414,7 +473,7 @@ export function FriendsView({
                     <button
                       type="button"
                       disabled={busyId === person.id}
-                      onClick={() => handleToggleFollow(person.id)}
+                      onClick={() => handleToggleFollow(person)}
                       className={`inline-flex items-center justify-center gap-1.5 px-3.5 h-9 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
                         isFollowing
                           ? 'border border-[#1877F2] text-[#1877F2] dark:border-[#60A5FA] dark:text-[#60A5FA]'

@@ -69,145 +69,140 @@ function SectionHeader({
   );
 }
 
-// 1. PROFESSIONAL DASHBOARD
+// 1. PROFESSIONAL DASHBOARD (100% live Cloud Firestore stats)
 export function DashboardView({
+  currentUser,
+  posts,
+  network,
   onBack,
   onOpenProfile,
 }: {
+  currentUser: UserProfile;
+  posts: PostItem[];
+  network: NetworkData;
   onBack: () => void;
   onOpenProfile: (id: number) => void;
 }) {
-  const [stats, setStats] = useState<DashboardStats | null>(null);
-
-  useEffect(() => {
-    apiRequest<{stats: DashboardStats}>('/api/dashboard')
-      .then((d) => setStats(d.stats))
-      .catch(() => {});
-  }, []);
+  const myPosts = posts.filter((p) => p.user_id === currentUser.id);
+  const stats: DashboardStats = {
+    posts_count: myPosts.length,
+    total_likes: myPosts.reduce((sum, p) => sum + p.likes_count, 0),
+    total_comments: myPosts.reduce((sum, p) => sum + p.comments_count, 0),
+    friends_count: network.friends.length,
+    followers_count: network.followingIds.length,
+    recent_posts: myPosts.slice(0, 10),
+  };
 
   return (
     <div className="space-y-4">
       <SectionHeader
         title="Professional Dashboard"
-        subtitle="Live summary of your posts, audience, and engagement"
+        subtitle="Live summary of your Cloud Firestore posts, audience, and engagement"
         onBack={onBack}
       />
 
-      {!stats ? (
-        <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-8 text-center text-sm text-[#65676B] dark:text-[#9CA3AF]">
-          Loading dashboard insights...
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[
+          {label: 'Total Posts', value: stats.posts_count},
+          {label: 'Reactions Received', value: stats.total_likes},
+          {label: 'Comments', value: stats.total_comments},
+          {label: 'Friends', value: stats.friends_count},
+        ].map((m) => (
+          <div
+            key={m.label}
+            className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-4"
+          >
+            <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">{m.label}</p>
+            <p className="text-2xl font-display font-bold text-[#111827] dark:text-white mt-1 tabular-nums">
+              {m.value}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl divide-y divide-[#E4E6EB] dark:divide-[#2E3035]">
+        <div className="px-5 py-3.5">
+          <h2 className="text-sm font-display font-bold text-[#111827] dark:text-white">
+            Recent Post Performance
+          </h2>
         </div>
-      ) : (
-        <>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {[
-              {label: 'Total Posts', value: stats.posts_count},
-              {label: 'Likes Received', value: stats.total_likes},
-              {label: 'Comments', value: stats.total_comments},
-              {label: 'Followers', value: stats.followers_count},
-            ].map((m) => (
-              <div
-                key={m.label}
-                className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-4"
-              >
-                <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">{m.label}</p>
-                <p className="text-2xl font-display font-bold text-[#111827] dark:text-white mt-1 tabular-nums">
-                  {m.value}
+        {stats.recent_posts.length === 0 ? (
+          <div className="p-6 text-center text-xs text-[#65676B] dark:text-[#9CA3AF]">
+            Publish posts from Home or Profile to track engagement here.
+          </div>
+        ) : (
+          stats.recent_posts.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => onOpenProfile(p.user_id)}
+              className="w-full px-5 py-3.5 flex items-center justify-between gap-4 text-left hover:bg-[#F8F9FA] dark:hover:bg-[#24262B] cursor-pointer"
+            >
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-[#111827] dark:text-white truncate">
+                  {p.content || (p.video_url ? 'Video post' : 'Photo post')}
+                </p>
+                <p className="text-xs text-[#65676B] dark:text-[#9CA3AF] tabular-nums mt-0.5">
+                  {formatRelativeTime(p.created_at)}
                 </p>
               </div>
-            ))}
-          </div>
-
-          <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl divide-y divide-[#E4E6EB] dark:divide-[#2E3035]">
-            <div className="px-5 py-3.5">
-              <h2 className="text-sm font-display font-bold text-[#111827] dark:text-white">
-                Recent Post Performance
-              </h2>
-            </div>
-            {stats.recent_posts.length === 0 ? (
-              <div className="p-6 text-center text-xs text-[#65676B] dark:text-[#9CA3AF]">
-                Publish posts from Home or Profile to track engagement here.
+              <div className="text-xs text-[#65676B] dark:text-[#9CA3AF] tabular-nums whitespace-nowrap">
+                {p.likes_count} reactions · {p.comments_count} comments
               </div>
-            ) : (
-              stats.recent_posts.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => onOpenProfile(p.user_id)}
-                  className="w-full px-5 py-3.5 flex items-center justify-between gap-4 text-left hover:bg-[#F8F9FA] dark:hover:bg-[#24262B] cursor-pointer"
-                >
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-[#111827] dark:text-white truncate">
-                      {p.content || (p.video_url ? 'Video post' : 'Photo post')}
-                    </p>
-                    <p className="text-xs text-[#65676B] dark:text-[#9CA3AF] tabular-nums mt-0.5">
-                      {formatRelativeTime(p.created_at)}
-                    </p>
-                  </div>
-                  <div className="text-xs text-[#65676B] dark:text-[#9CA3AF] tabular-nums whitespace-nowrap">
-                    {p.likes_count} likes · {p.comments_count} comments
-                  </div>
-                </button>
-              ))
-            )}
-          </div>
-        </>
-      )}
+            </button>
+          ))
+        )}
+      </div>
     </div>
   );
 }
 
-// 2. SAVED POSTS
+// 2. SAVED POSTS (from live Cloud Firestore posts)
 export function SavedPostsView({
   currentUser,
+  posts,
+  followingIds = [],
   onBack,
   onOpenProfile,
+  onOpenPage,
   onToggleLike,
   onToggleSave,
+  onHidePost,
+  onToggleFollowAuthor,
   onCommentAdded,
+  onCommentDeleted,
   onDeletePost,
 }: {
   currentUser: UserProfile;
+  posts: PostItem[];
+  followingIds?: number[];
   onBack: () => void;
   onOpenProfile: (id: number) => void;
+  onOpenPage?: (pageId: string) => void;
   onToggleLike: (id: number, reaction?: ReactionType) => void;
   onToggleSave: (id: number) => void;
+  onHidePost?: (post: PostItem) => Promise<void> | void;
+  onToggleFollowAuthor?: (authorUid: string) => Promise<void> | void;
   onCommentAdded: (postId: number, comment: CommentItem) => void;
-  onDeletePost: (id: number) => void;
+  onCommentDeleted?: (postId: number, commentId: number) => void;
+  onDeletePost: (id: number) => Promise<void> | void;
 }) {
-  const [savedPosts, setSavedPosts] = useState<PostItem[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  function load() {
-    setLoading(true);
-    apiRequest<{posts: PostItem[]}>('/api/saved')
-      .then((d) => setSavedPosts(d.posts))
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }
-
-  useEffect(() => {
-    load();
-  }, []);
+  const savedPosts = posts.filter((p) => p.saved_by_me);
 
   return (
     <div className="space-y-4">
       <SectionHeader
         title="Saved"
-        subtitle="Posts you bookmarked to revisit anytime"
+        subtitle="Posts you bookmarked permanently in Cloud Firestore"
         onBack={onBack}
       />
 
-      {loading ? (
-        <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-8 text-center text-sm text-[#65676B] dark:text-[#9CA3AF]">
-          Loading saved posts...
-        </div>
-      ) : savedPosts.length === 0 ? (
+      {savedPosts.length === 0 ? (
         <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-10 text-center space-y-2">
           <Bookmark className="w-7 h-7 mx-auto text-[#65676B] dark:text-[#9CA3AF]" />
           <p className="text-sm font-semibold text-[#111827] dark:text-white">No saved posts yet</p>
           <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
-            Tap Save on any post in your Home feed to keep it here.
+            Tap Save or use the 3-dot menu on any post to keep it here permanently.
           </p>
         </div>
       ) : (
@@ -216,68 +211,16 @@ export function SavedPostsView({
             key={post.id}
             post={post}
             currentUser={currentUser}
+            isFollowingAuthor={followingIds.includes(post.user_id)}
             onOpenProfile={onOpenProfile}
-            onToggleLike={(pid, reaction) => {
-              const targetReaction: ReactionType = reaction || 'like';
-              onToggleLike(pid, targetReaction);
-              setSavedPosts((prev) =>
-                prev.map((p) => {
-                  if (p.id !== pid) return p;
-                  const current: ReactionType | null = p.my_reaction || (p.liked_by_me ? 'like' : null);
-                  const counts: Partial<Record<ReactionType, number>> = {...(p.reaction_counts || {})};
-                  if (current === targetReaction) {
-                    const prevCount = counts[current] || 1;
-                    if (prevCount <= 1) delete counts[current];
-                    else counts[current] = prevCount - 1;
-                    return {
-                      ...p,
-                      liked_by_me: false,
-                      my_reaction: null,
-                      likes_count: Math.max(0, p.likes_count - 1),
-                      reaction_counts: counts,
-                    };
-                  }
-                  if (current) {
-                    const prevCount = counts[current] || 1;
-                    if (prevCount <= 1) delete counts[current];
-                    else counts[current] = prevCount - 1;
-                    counts[targetReaction] = (counts[targetReaction] || 0) + 1;
-                    return {
-                      ...p,
-                      liked_by_me: true,
-                      my_reaction: targetReaction,
-                      reaction_counts: counts,
-                    };
-                  }
-                  counts[targetReaction] = (counts[targetReaction] || 0) + 1;
-                  return {
-                    ...p,
-                    liked_by_me: true,
-                    my_reaction: targetReaction,
-                    likes_count: p.likes_count + 1,
-                    reaction_counts: counts,
-                  };
-                }),
-              );
-            }}
-            onToggleSave={(pid) => {
-              onToggleSave(pid);
-              setSavedPosts((prev) => prev.filter((p) => p.id !== pid));
-            }}
-            onCommentAdded={(pid, comment) => {
-              onCommentAdded(pid, comment);
-              setSavedPosts((prev) =>
-                prev.map((p) =>
-                  p.id === pid
-                    ? {...p, comments: [...p.comments, comment], comments_count: p.comments_count + 1}
-                    : p,
-                ),
-              );
-            }}
-            onDeletePost={(pid) => {
-              onDeletePost(pid);
-              setSavedPosts((prev) => prev.filter((p) => p.id !== pid));
-            }}
+            onOpenPage={onOpenPage}
+            onToggleLike={onToggleLike}
+            onToggleSave={onToggleSave}
+            onHidePost={onHidePost}
+            onToggleFollowAuthor={onToggleFollowAuthor}
+            onCommentAdded={onCommentAdded}
+            onCommentDeleted={onCommentDeleted}
+            onDeletePost={onDeletePost}
           />
         ))
       )}
@@ -1041,19 +984,25 @@ export function MemoriesView({
   posts,
   onBack,
   onOpenProfile,
+  onOpenPage,
   onToggleLike,
   onToggleSave,
+  onHidePost,
   onCommentAdded,
+  onCommentDeleted,
   onDeletePost,
 }: {
   currentUser: UserProfile;
   posts: PostItem[];
   onBack: () => void;
   onOpenProfile: (id: number) => void;
+  onOpenPage?: (pageId: string) => void;
   onToggleLike: (id: number, reaction?: ReactionType) => void;
   onToggleSave: (id: number) => void;
+  onHidePost?: (post: PostItem) => Promise<void> | void;
   onCommentAdded: (postId: number, comment: CommentItem) => void;
-  onDeletePost: (id: number) => void;
+  onCommentDeleted?: (postId: number, commentId: number) => void;
+  onDeletePost: (id: number) => Promise<void> | void;
 }) {
   const myPosts = posts.filter((p) => p.user_id === currentUser.id);
   return (
@@ -1080,9 +1029,12 @@ export function MemoriesView({
             post={post}
             currentUser={currentUser}
             onOpenProfile={onOpenProfile}
+            onOpenPage={onOpenPage}
             onToggleLike={onToggleLike}
             onToggleSave={onToggleSave}
+            onHidePost={onHidePost}
             onCommentAdded={onCommentAdded}
+            onCommentDeleted={onCommentDeleted}
             onDeletePost={onDeletePost}
           />
         ))

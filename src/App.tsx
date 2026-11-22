@@ -1,5 +1,7 @@
-import {useCallback, useEffect, useRef, useState} from 'react';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import {onAuthStateChanged, type User as FirebaseUser} from 'firebase/auth';
 import {
+  AlertCircle,
   Bell,
   Home,
   LogOut,
@@ -10,8 +12,11 @@ import {
   Settings,
   Sun,
   Users,
+  X,
 } from 'lucide-react';
 import {AuthGate} from './components/AuthGate';
+import {CallOverlay} from './components/CallOverlay';
+import type {OutgoingChatPayload} from './components/ChatInputBar';
 import {
   ChatConversationWindow,
   MessagesPage,
@@ -19,38 +24,80 @@ import {
   RightRailPanel,
 } from './components/ChatPanel';
 import {FriendsView} from './components/FriendsView';
+import {GroupCallOverlay} from './components/GroupCallOverlay';
 import {
   ActivityLogView,
   BirthdaysView,
   DashboardView,
   EventsView,
-  GroupsView,
   MarketplaceView,
   MemoriesView,
-  PagesView,
   ReelsView,
   SavedPostsView,
 } from './components/HubFeaturesView';
 import {Avatar, CoverImage} from './components/MediaImage';
 import {MenuView} from './components/MenuView';
+import {PagesHubView} from './components/PagesHubView';
 import {PostCard} from './components/PostCard';
 import {PostComposer} from './components/PostComposer';
 import {ProfileView} from './components/ProfileView';
 import {SettingsView} from './components/SettingsView';
-import {clearVaultSessionToken, saveAccountToVault} from './lib/accountVault';
-import {apiRequest, getAuthToken, isUsingLocalFallback, setAuthToken} from './lib/api';
-import {auth, signOutFirebase, syncUserProfileToFirestore} from './lib/firebase';
+import {saveAccountToVault} from './lib/accountVault';
+import {subscribeIncomingCalls} from './lib/callService';
+import {
+  auth,
+  authPersistenceReady,
+  formatFirestoreErrorMessage,
+  isFirebaseUserVerified,
+  signOutFirebase,
+} from './lib/firebase';
+import {
+  deletePostPermanent,
+  ensureAndLoadUserProfile,
+  hidePostPermanent,
+  markAllNotificationsReadPermanent,
+  markMessagesReadPermanent,
+  markNotificationReadPermanent,
+  sendMessagePermanent,
+  setTypingStatePermanent,
+  subscribeHiddenPostsPermanent,
+  subscribeMessagesPermanent,
+  subscribeNetworkPermanent,
+  subscribeNotificationsPermanent,
+  subscribePostsPermanent,
+  subscribePresencePermanent,
+  subscribePublicUsers,
+  subscribeSavedPostsPermanent,
+  subscribeTypingStatesPermanent,
+  toggleFollowPermanent,
+  toggleReactionPermanent,
+  toggleSavePostPermanent,
+  uidToNumericId,
+  updatePresencePermanent,
+} from './lib/firestoreStore';
+import {
+  startGroupCallPermanent,
+  subscribeGroupsPermanent,
+  subscribeIncomingGroupCalls,
+} from './lib/groupService';
+import {subscribePagesPermanent} from './lib/pageService';
 import type {
   AppView,
   AuthView,
+  CallSessionDoc,
+  CallType,
+  ChatGroupDoc,
   ChatMessage,
   CommentItem,
   ConversationSummary,
+  GroupCallDoc,
   NetworkData,
   NotificationItem,
   PostItem,
+  PresenceRecord,
   ReactionType,
   SettingsSection,
+  SocialPageDoc,
   UserProfile,
 } from './types';
 
@@ -87,11 +134,17 @@ function parseLocation() {
     if (Number.isFinite(parsed) && parsed > 0) profileId = parsed;
   }
 
+  const pageIdParam = params.get('page') || null;
+  if (pageIdParam && appView === 'home') {
+    appView = 'pages';
+  }
+
   return {
     path,
     authView,
     appView,
     profileId,
+    pageId: pageIdParam,
     resetToken: params.get('token') || '',
   };
 }
@@ -104,23 +157,28 @@ export default function App() {
     return document.documentElement.classList.contains('dark') ? 'dark' : 'light';
   });
 
-  // Auth & routing state
+  // Firebase Auth & routing state
   const [booting, setBooting] = useState(true);
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [pendingVerificationUser, setPendingVerificationUser] = useState<FirebaseUser | null>(null);
   const [authView, setAuthView] = useState<AuthView>(initialLoc.authView);
   const [resetTokenFromUrl, setResetTokenFromUrl] = useState(initialLoc.resetToken);
   const [appView, setAppView] = useState<AppView>(initialLoc.appView);
   const [activeProfileId, setActiveProfileId] = useState<number | null>(initialLoc.profileId);
+  const [activePageId, setActivePageId] = useState<string | null>(initialLoc.pageId);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('overview');
+  const [globalError, setGlobalError] = useState<string | null>(null);
 
-  // Feed state
+  // Permanent Cloud Firestore live state (ZERO mock/demo data)
+  const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
   const [feedFilter, setFeedFilter] = useState<'all' | 'following'>('all');
   const [posts, setPosts] = useState<PostItem[]>([]);
   const [loadingPosts, setLoadingPosts] = useState(false);
+  const [savedPostDocIds, setSavedPostDocIds] = useState<Set<string>>(() => new Set());
+  const [hiddenPostDocIds, setHiddenPostDocIds] = useState<Set<string>>(() => new Set());
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<UserProfile[]>([]);
 
-  // Network, notifications, chat state
+  // Network, notifications, chat, presence, typing, groups & pages state (all synced from Cloud Firestore)
   const [network, setNetwork] = useState<NetworkData>({
     friends: [],
     incomingRequests: [],
@@ -130,14 +188,25 @@ export default function App() {
   });
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
-  const [onlineUserIds, setOnlineUserIds] = useState<number[]>([]);
   const [activeChatPeer, setActiveChatPeer] = useState<UserProfile | null>(null);
   const [floatingChatOpen, setFloatingChatOpen] = useState(false);
   const [messagesByPeer, setMessagesByPeer] = useState<Record<number, ChatMessage[]>>({});
-  const [typingUsers, setTypingUsers] = useState<Record<number, boolean>>({});
+  const [presenceByUid, setPresenceByUid] = useState<Record<string, PresenceRecord>>({});
+  const [typingByPeerUid, setTypingByPeerUid] = useState<Record<string, boolean>>({});
+  const [groups, setGroups] = useState<ChatGroupDoc[]>([]);
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
+  const [pages, setPages] = useState<SocialPageDoc[]>([]);
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimerRef = useRef<number | null>(null);
+  // Real-time WebRTC + Firestore 1-on-1 & Group Audio/Video Call state
+  const [outgoingCallTarget, setOutgoingCallTarget] = useState<{
+    peer: UserProfile;
+    type: CallType;
+  } | null>(null);
+  const [incomingCall, setIncomingCall] = useState<CallSessionDoc | null>(null);
+  const [activeGroupCallsList, setActiveGroupCallsList] = useState<GroupCallDoc[]>([]);
+  const [activeGroupCall, setActiveGroupCall] = useState<GroupCallDoc | null>(null);
+  const [declinedGroupCallIds, setDeclinedGroupCallIds] = useState<Set<string>>(() => new Set());
+
   const currentUserRef = useRef<UserProfile | null>(null);
   currentUserRef.current = currentUser;
 
@@ -192,6 +261,13 @@ export default function App() {
     window.scrollTo({top: 0, behavior: 'smooth'});
   }, []);
 
+  const handleOpenPage = useCallback((pageId: string) => {
+    setActivePageId(pageId);
+    window.history.pushState({}, '', `/pages?page=${encodeURIComponent(pageId)}`);
+    setAppView('pages');
+    window.scrollTo({top: 0, behavior: 'smooth'});
+  }, []);
+
   useEffect(() => {
     function handlePopState() {
       const loc = parseLocation();
@@ -199,322 +275,372 @@ export default function App() {
       setResetTokenFromUrl(loc.resetToken);
       setAppView(loc.appView);
       setActiveProfileId(loc.profileId);
+      setActivePageId(loc.pageId);
     }
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  // Data loaders
-  const loadPosts = useCallback(async (filter: 'all' | 'following' = feedFilter) => {
-    setLoadingPosts(true);
-    try {
-      const data = await apiRequest<{posts: PostItem[]}>(`/api/posts?filter=${filter}`);
-      setPosts(data.posts);
-    } catch {
-      // Handled gracefully
-    } finally {
-      setLoadingPosts(false);
-    }
-  }, [feedFilter]);
-
-  const loadNetwork = useCallback(async () => {
-    try {
-      const data = await apiRequest<NetworkData>('/api/network');
-      setNetwork(data);
-    } catch {
-      // Ignore
-    }
-  }, []);
-
-  const loadNotifications = useCallback(async () => {
-    try {
-      const data = await apiRequest<{notifications: NotificationItem[]}>('/api/notifications');
-      setNotifications(data.notifications);
-    } catch {
-      // Ignore
-    }
-  }, []);
-
-  const loadConversations = useCallback(async () => {
-    try {
-      const data = await apiRequest<{
-        conversations: ConversationSummary[];
-        onlineUserIds: number[];
-      }>('/api/messages/conversations');
-      setConversations(data.conversations);
-      setOnlineUserIds(data.onlineUserIds);
-    } catch {
-      // Ignore
-    }
-  }, []);
-
-  const loadMessagesForPeer = useCallback(async (peerId: number) => {
-    try {
-      const data = await apiRequest<{messages: ChatMessage[]}>(`/api/messages/${peerId}`);
-      setMessagesByPeer((prev) => ({...prev, [peerId]: data.messages}));
-      setConversations((prev) =>
-        prev.map((c) => (c.user.id === peerId ? {...c, unread_count: 0} : c)),
-      );
-    } catch {
-      // Ignore
-    }
-  }, []);
-
-  // Boot auth check
+  // 1. PERSISTENT FIREBASE AUTH LISTENER (browserLocalPersistence — survives close & reopen!)
   useEffect(() => {
-    const token = getAuthToken();
-    if (!token) {
-      setBooting(false);
-      return;
-    }
+    let mounted = true;
+    let unsubAuth: (() => void) | null = null;
 
-    apiRequest<{user: UserProfile}>('/api/auth/me')
-      .then((data) => {
-        setCurrentUser(data.user);
-        saveAccountToVault({user: data.user, sessionToken: token}).catch(() => {});
-        const loc = parseLocation();
-        if (
-          loc.path === '/login' ||
-          loc.path === '/register' ||
-          loc.path === '/signup' ||
-          loc.path === '/forgot-password' ||
-          loc.path === '/reset-password'
-        ) {
-          window.history.replaceState({}, '', '/');
-          setAppView('home');
+    authPersistenceReady.finally(() => {
+      if (!mounted) return;
+      unsubAuth = onAuthStateChanged(auth, async (fbUser) => {
+        if (!mounted) return;
+
+        if (!fbUser) {
+          setPendingVerificationUser(null);
+          setCurrentUser(null);
+          setBooting(false);
+          return;
         }
-      })
-      .catch(() => {
-        setAuthToken(null);
-        setCurrentUser(null);
-      })
-      .finally(() => {
-        setBooting(false);
-      });
-  }, []);
 
-  // Load initial app data when authenticated
-  useEffect(() => {
-    if (!currentUser) return;
-    loadPosts(feedFilter);
-    loadNetwork();
-    loadNotifications();
-    loadConversations();
-  }, [currentUser?.id]);
-
-  // Reload posts on filter switch
-  useEffect(() => {
-    if (!currentUser) return;
-    loadPosts(feedFilter);
-  }, [feedFilter]);
-
-  // People search
-  useEffect(() => {
-    if (!currentUser) return;
-    const trimmed = searchQuery.trim();
-    if (!trimmed) {
-      setSearchResults([]);
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      apiRequest<{users: UserProfile[]}>(`/api/users/search?q=${encodeURIComponent(trimmed)}`)
-        .then((data) => setSearchResults(data.users))
-        .catch(() => setSearchResults([]));
-    }, 200);
-    return () => window.clearTimeout(timer);
-  }, [searchQuery, currentUser]);
-
-  // Real-time WebSocket connection with automatic reconnect
-  useEffect(() => {
-    if (!currentUser) {
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-      return;
-    }
-
-    let cancelled = false;
-
-    function connect() {
-      const token = getAuthToken();
-      if (!token || cancelled || isUsingLocalFallback() || token.startsWith('local_')) return;
-
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`;
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onmessage = (event) => {
         try {
-          const parsed = JSON.parse(event.data) as {event: string; payload: any};
-          const me = currentUserRef.current;
-          if (!me) return;
+          await fbUser.reload().catch(() => {});
+          const refreshed = auth.currentUser || fbUser;
 
-          switch (parsed.event) {
-            case 'presence:update': {
-              setOnlineUserIds(parsed.payload.onlineUserIds || []);
-              break;
-            }
-            case 'post:created': {
-              const incomingPost = parsed.payload as PostItem;
-              setPosts((prev) =>
-                prev.some((p) => p.id === incomingPost.id) ? prev : [incomingPost, ...prev],
-              );
-              break;
-            }
-            case 'post:deleted': {
-              const {postId} = parsed.payload as {postId: number};
-              setPosts((prev) => prev.filter((p) => p.id !== postId));
-              break;
-            }
-            case 'post:liked': {
-              const {postId, likes_count, actorId, liked, my_reaction, reaction_counts} =
-                parsed.payload as {
-                  postId: number;
-                  likes_count: number;
-                  actorId: number;
-                  liked: boolean;
-                  my_reaction?: ReactionType | null;
-                  reaction_counts?: Partial<Record<ReactionType, number>>;
-                };
-              setPosts((prev) =>
-                prev.map((p) =>
-                  p.id === postId
-                    ? {
-                        ...p,
-                        likes_count,
-                        reaction_counts: reaction_counts ?? p.reaction_counts,
-                        liked_by_me: actorId === me.id ? liked : p.liked_by_me,
-                        my_reaction:
-                          actorId === me.id
-                            ? (my_reaction ?? (liked ? 'like' : null))
-                            : p.my_reaction,
-                      }
-                    : p,
-                ),
-              );
-              break;
-            }
-            case 'post:commented': {
-              const {postId, comment} = parsed.payload as {postId: number; comment: CommentItem};
-              setPosts((prev) =>
-                prev.map((p) => {
-                  if (p.id !== postId) return p;
-                  if (p.comments.some((c) => c.id === comment.id)) return p;
-                  return {
-                    ...p,
-                    comments: [...p.comments, comment],
-                    comments_count: p.comments_count + 1,
-                  };
-                }),
-              );
-              break;
-            }
-            case 'notification:new': {
-              const notif = parsed.payload as NotificationItem;
-              setNotifications((prev) =>
-                prev.some((n) => n.id === notif.id) ? prev : [notif, ...prev],
-              );
-              break;
-            }
-            case 'network:updated': {
-              loadNetwork();
-              loadConversations();
-              break;
-            }
-            case 'profile:updated': {
-              const updated = parsed.payload as UserProfile;
-              if (updated.id === me.id) {
-                setCurrentUser((prev) => (prev ? {...prev, ...updated} : updated));
-              }
-              setPosts((prev) =>
-                prev.map((p) =>
-                  p.user_id === updated.id
-                    ? {
-                        ...p,
-                        author_name: updated.name,
-                        author_avatar: updated.avatar_url,
-                        author_work: updated.work,
-                      }
-                    : p,
-                ),
-              );
-              loadConversations();
-              break;
-            }
-            case 'chat:message': {
-              const msg = parsed.payload as ChatMessage;
-              const peerId = msg.sender_id === me.id ? msg.receiver_id : msg.sender_id;
-              setMessagesByPeer((prev) => {
-                const existing = prev[peerId] || [];
-                if (existing.some((m) => m.id === msg.id)) return prev;
-                return {...prev, [peerId]: [...existing, msg]};
-              });
-              loadConversations();
-              break;
-            }
-            case 'chat:typing': {
-              const {senderId, isTyping} = parsed.payload as {senderId: number; isTyping: boolean};
-              setTypingUsers((prev) => ({...prev, [senderId]: isTyping}));
-              break;
-            }
+          // STRICT VERIFICATION GATE: block unverified Email+Password accounts
+          if (!isFirebaseUserVerified(refreshed)) {
+            setPendingVerificationUser(refreshed);
+            setCurrentUser(null);
+            setBooting(false);
+            return;
           }
-        } catch {
-          // Ignore malformed payloads
-        }
-      };
 
-      ws.onclose = () => {
-        if (!cancelled) {
-          reconnectTimerRef.current = window.setTimeout(connect, 2500);
-        }
-      };
-    }
+          // CRITICAL: Force-refresh JWT so request.auth.token.email_verified == true in Firestore rules!
+          await refreshed.getIdToken(true);
 
-    connect();
+          // Auto-fetch profile, photo, cover, bio permanently from Cloud Firestore by UID
+          const profile = await ensureAndLoadUserProfile(refreshed);
+          if (!mounted) return;
+          setPendingVerificationUser(null);
+          setCurrentUser(profile);
+          saveAccountToVault({
+            user: profile,
+            firebaseUid: refreshed.uid,
+          }).catch(() => {});
+
+          const loc = parseLocation();
+          if (
+            loc.path === '/login' ||
+            loc.path === '/register' ||
+            loc.path === '/signup' ||
+            loc.path === '/forgot-password' ||
+            loc.path === '/reset-password'
+          ) {
+            window.history.replaceState({}, '', '/');
+            setAppView('home');
+          }
+        } catch (err) {
+          if (!mounted) return;
+          setGlobalError(formatFirestoreErrorMessage(err));
+        } finally {
+          if (mounted) setBooting(false);
+        }
+      });
+    });
 
     return () => {
-      cancelled = true;
-      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+      mounted = false;
+      unsubAuth?.();
     };
-  }, [currentUser?.id, loadConversations, loadNetwork]);
+  }, []);
+
+  // 2. REAL-TIME FIRESTORE SUBSCRIPTIONS: Users, Posts, Saved, Hidden, Notifications, Calls, Presence, Typing, Groups, Group Calls, Pages
+  useEffect(() => {
+    const myUid = currentUser?.uid;
+    if (!myUid) {
+      setAllUsers([]);
+      setPosts([]);
+      setSavedPostDocIds(new Set());
+      setHiddenPostDocIds(new Set());
+      setNotifications([]);
+      setIncomingCall(null);
+      setPresenceByUid({});
+      setTypingByPeerUid({});
+      setGroups([]);
+      setActiveGroupId(null);
+      setActiveGroupCallsList([]);
+      setActiveGroupCall(null);
+      setPages([]);
+      return;
+    }
+
+    setLoadingPosts(true);
+
+    // Presence heartbeat: mark online immediately, refresh every 45s, mark offline on unload
+    void updatePresencePermanent(myUid, true);
+    const heartbeat = window.setInterval(() => {
+      if (!document.hidden) {
+        void updatePresencePermanent(myUid, true);
+      }
+    }, 45000);
+    const handleVisibility = () => {
+      void updatePresencePermanent(myUid, !document.hidden);
+    };
+    const handleBeforeUnload = () => {
+      void updatePresencePermanent(myUid, false);
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    const unsubUsers = subscribePublicUsers(
+      (users) => {
+        setAllUsers(users);
+        const mine = users.find((u) => u.uid === myUid);
+        if (mine) {
+          setCurrentUser((prev) => {
+            if (!prev || prev.uid !== myUid) return prev;
+            if (
+              prev.name === mine.name &&
+              prev.bio === mine.bio &&
+              prev.work === mine.work &&
+              prev.location === mine.location &&
+              prev.avatar_url === mine.avatar_url &&
+              prev.cover_url === mine.cover_url
+            ) {
+              return prev;
+            }
+            return {
+              ...prev,
+              name: mine.name,
+              bio: mine.bio,
+              work: mine.work,
+              location: mine.location,
+              avatar_url: mine.avatar_url,
+              cover_url: mine.cover_url,
+            };
+          });
+        }
+      },
+      (err) => {
+        setGlobalError(formatFirestoreErrorMessage(err));
+      },
+    );
+
+    const unsubPosts = subscribePostsPermanent(
+      myUid,
+      (loadedPosts) => {
+        setPosts(loadedPosts);
+        setLoadingPosts(false);
+      },
+      (err) => {
+        setLoadingPosts(false);
+        setGlobalError(formatFirestoreErrorMessage(err));
+      },
+    );
+
+    const unsubSaved = subscribeSavedPostsPermanent(myUid, setSavedPostDocIds);
+    const unsubHidden = subscribeHiddenPostsPermanent(myUid, setHiddenPostDocIds);
+    const unsubPresence = subscribePresencePermanent(setPresenceByUid);
+    const unsubTyping = subscribeTypingStatesPermanent(myUid, setTypingByPeerUid);
+
+    const unsubNotifs = subscribeNotificationsPermanent(myUid, (list) => {
+      setNotifications(list);
+    });
+
+    const unsubCalls = subscribeIncomingCalls(myUid, (call) => {
+      setIncomingCall((prev) => {
+        if (outgoingCallTarget && call) return prev;
+        return call;
+      });
+    });
+
+    const unsubGroups = subscribeGroupsPermanent(myUid, (loadedGroups) => {
+      setGroups(loadedGroups);
+    });
+
+    const unsubGroupCalls = subscribeIncomingGroupCalls(myUid, (callsList) => {
+      setActiveGroupCallsList(callsList);
+    });
+
+    const unsubPages = subscribePagesPermanent(
+      (loadedPages) => {
+        setPages(loadedPages);
+      },
+      (err) => {
+        setGlobalError(formatFirestoreErrorMessage(err));
+      },
+    );
+
+    return () => {
+      window.clearInterval(heartbeat);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      unsubUsers();
+      unsubPosts();
+      unsubSaved();
+      unsubHidden();
+      unsubPresence();
+      unsubTyping();
+      unsubNotifs();
+      unsubCalls();
+      unsubGroups();
+      unsubGroupCalls();
+      unsubPages();
+    };
+  }, [currentUser?.uid]);
+
+  // 3. REAL-TIME FIRESTORE SUBSCRIPTIONS: Friends/Follows & Direct Messages + Call History
+  useEffect(() => {
+    const myUid = currentUser?.uid;
+    if (!myUid) {
+      setNetwork({
+        friends: [],
+        incomingRequests: [],
+        outgoingRequests: [],
+        suggestions: [],
+        followingIds: [],
+      });
+      setMessagesByPeer({});
+      setConversations([]);
+      return;
+    }
+
+    const unsubNetwork = subscribeNetworkPermanent(
+      myUid,
+      allUsers,
+      (net) => {
+        setNetwork(net);
+      },
+      (err) => {
+        setGlobalError(formatFirestoreErrorMessage(err));
+      },
+    );
+
+    const unsubMessages = subscribeMessagesPermanent(myUid, allUsers, (data) => {
+      setMessagesByPeer(data.messagesByPeer);
+      setConversations(data.conversations);
+    });
+
+    return () => {
+      unsubNetwork();
+      unsubMessages();
+    };
+  }, [currentUser?.uid, allUsers]);
+
+  // Keep activeChatPeer synced with fresh Firestore profile updates
+  useEffect(() => {
+    if (!activeChatPeer) return;
+    const fresh = allUsers.find((u) => u.id === activeChatPeer.id);
+    if (fresh && (fresh.name !== activeChatPeer.name || fresh.avatar_url !== activeChatPeer.avatar_url)) {
+      setActiveChatPeer(fresh);
+    }
+  }, [allUsers, activeChatPeer]);
+
+  // Derived search results from live Cloud Firestore users (zero mock data)
+  const searchResults = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q || !currentUser) return [];
+    return allUsers.filter(
+      (u) =>
+        u.uid !== currentUser.uid &&
+        (u.name.toLowerCase().includes(q) ||
+          u.work.toLowerCase().includes(q) ||
+          u.location.toLowerCase().includes(q)),
+    );
+  }, [searchQuery, allUsers, currentUser]);
+
+  // Decorated posts with real Firestore saved_by_me status
+  const decoratedPosts = useMemo(() => {
+    return posts.map((p) => ({
+      ...p,
+      saved_by_me: Boolean(p.docId && savedPostDocIds.has(p.docId)),
+    }));
+  }, [posts, savedPostDocIds]);
+
+  // Filtered feed posts (excludes posts the user explicitly hid in Firestore)
+  const visiblePosts = useMemo(() => {
+    const notHidden = decoratedPosts.filter((p) => !p.docId || !hiddenPostDocIds.has(p.docId));
+    if (feedFilter === 'all' || !currentUser) return notHidden;
+    const allowedIds = new Set<number>([
+      currentUser.id,
+      ...network.friends.map((f) => f.id),
+      ...network.followingIds,
+    ]);
+    const followedPageIds = new Set<string>(
+      pages
+        .filter((pg) => currentUser.uid && pg.followers.includes(currentUser.uid))
+        .map((pg) => pg.pageId),
+    );
+    return notHidden.filter(
+      (p) =>
+        allowedIds.has(p.user_id) || (p.page_id ? followedPageIds.has(p.page_id) : false),
+    );
+  }, [
+    decoratedPosts,
+    hiddenPostDocIds,
+    feedFilter,
+    currentUser,
+    network.friends,
+    network.followingIds,
+    pages,
+  ]);
+
+  // Real-time online users from Cloud Firestore presence collection
+  const onlineUserIds = useMemo(() => {
+    const now = Date.now();
+    const ids = new Set<number>();
+    if (currentUser) ids.add(currentUser.id);
+    for (const [uid, rec] of Object.entries(presenceByUid)) {
+      if (!rec.online) continue;
+      const lastMs = rec.lastSeen ? new Date(rec.lastSeen).getTime() : 0;
+      if (now - lastMs < 120000) {
+        ids.add(uidToNumericId(uid));
+      }
+    }
+    return Array.from(ids);
+  }, [presenceByUid, currentUser]);
+
+  // Convert real-time Firestore typingByPeerUid to numeric peerId map for ChatPanel
+  const typingUsers = useMemo(() => {
+    const map: Record<number, boolean> = {};
+    for (const [uid, isTyping] of Object.entries(typingByPeerUid)) {
+      if (isTyping) map[uidToNumericId(uid)] = true;
+    }
+    return map;
+  }, [typingByPeerUid]);
+
+  // Incoming Group Call popup (any ringing/active group call I haven't joined or declined)
+  const incomingGroupCall = useMemo(() => {
+    const myUid = currentUser?.uid;
+    if (!myUid || activeGroupCall) return null;
+    return (
+      activeGroupCallsList.find(
+        (c) =>
+          c.hostUid !== myUid &&
+          !c.activeUids.includes(myUid) &&
+          !declinedGroupCallIds.has(c.id),
+      ) || null
+    );
+  }, [activeGroupCallsList, activeGroupCall, currentUser?.uid, declinedGroupCallIds]);
 
   // Handlers
   function handleUserUpdated(updated: UserProfile) {
     setCurrentUser(updated);
-    saveAccountToVault({user: updated}).catch(() => {});
-    if (auth.currentUser) {
-      const method = auth.currentUser.phoneNumber ? 'phone_otp' : 'google';
-      syncUserProfileToFirestore(auth.currentUser, updated, method).catch(() => {});
-    }
+    saveAccountToVault({user: updated, firebaseUid: updated.uid || null}).catch(() => {});
   }
 
   function handleAuthenticated(user: UserProfile, token: string) {
-    saveAccountToVault({user, sessionToken: token}).catch(() => {});
+    saveAccountToVault({user, firebaseUid: user.uid || null, sessionToken: token}).catch(() => {});
+    setPendingVerificationUser(null);
     setCurrentUser(user);
+    setGlobalError(null);
     setMessagesByPeer({});
     setFloatingChatOpen(false);
     setActiveChatPeer(null);
-    // Always redirect authenticated users to Home
     window.history.replaceState({}, '', '/');
     setAppView('home');
     setActiveProfileId(user.id);
   }
 
-  // Open Login or Create Account while keeping the current account's session token alive in the vault
-  // so the user can 1-tap switch back and forth between all their IDs just like Facebook.
-  function handleAddAccount(mode: 'login' | 'register') {
-    const activeToken = getAuthToken();
-    if (currentUser && activeToken) {
-      saveAccountToVault({user: currentUser, sessionToken: activeToken}).catch(() => {});
-    }
-    setAuthToken(null);
+  async function handleAddAccount(mode: 'login' | 'register') {
+    await signOutFirebase();
     setCurrentUser(null);
+    setPendingVerificationUser(null);
     setFloatingChatOpen(false);
     setActiveChatPeer(null);
     setMessagesByPeer({});
@@ -524,37 +650,33 @@ export default function App() {
   }
 
   async function handleLogout() {
-    const exitingIdentifier = currentUser?.email || currentUser?.phone || '';
-    try {
-      await apiRequest('/api/auth/logout', {method: 'POST'});
-    } catch {
-      // Proceed with local sign out
+    if (currentUser?.uid) {
+      await updatePresencePermanent(currentUser.uid, false).catch(() => {});
     }
     await signOutFirebase();
-    if (exitingIdentifier) {
-      await clearVaultSessionToken(exitingIdentifier).catch(() => {});
-    }
-    // Clear ONLY the active session token — NEVER delete saved accounts from vault, DB, or Firestore
-    setAuthToken(null);
     setCurrentUser(null);
+    setPendingVerificationUser(null);
     setFloatingChatOpen(false);
     setActiveChatPeer(null);
+    setOutgoingCallTarget(null);
+    setIncomingCall(null);
+    setActiveGroupCall(null);
     setMessagesByPeer({});
     window.history.replaceState({}, '', '/login');
     setAuthView('login');
   }
 
   async function handleToggleLike(postId: number, reaction?: ReactionType) {
+    if (!currentUser) return;
+    const target = posts.find((p) => p.id === postId);
+    if (!target?.docId) return;
     try {
-      const data = await apiRequest<{
-        liked: boolean;
-        my_reaction: ReactionType | null;
-        likes_count: number;
-        reaction_counts: Partial<Record<ReactionType, number>>;
-      }>(`/api/posts/${postId}/like`, {
-        method: 'POST',
-        body: JSON.stringify(reaction ? {reaction} : {}),
-      });
+      const data = await toggleReactionPermanent(
+        target.docId,
+        currentUser,
+        target.author_uid,
+        reaction || 'like',
+      );
       setPosts((prev) =>
         prev.map((p) =>
           p.id === postId
@@ -568,21 +690,39 @@ export default function App() {
             : p,
         ),
       );
-    } catch {
-      // Ignore
+    } catch (err) {
+      setGlobalError(formatFirestoreErrorMessage(err));
     }
   }
 
   async function handleToggleSave(postId: number) {
+    if (!currentUser?.uid) return;
+    const target = posts.find((p) => p.id === postId);
+    if (!target?.docId) return;
     try {
-      const data = await apiRequest<{saved: boolean}>(`/api/posts/${postId}/save`, {
-        method: 'POST',
-      });
-      setPosts((prev) =>
-        prev.map((p) => (p.id === postId ? {...p, saved_by_me: data.saved} : p)),
-      );
-    } catch {
-      // Ignore
+      await toggleSavePostPermanent(currentUser.uid, target.docId);
+    } catch (err) {
+      setGlobalError(formatFirestoreErrorMessage(err));
+    }
+  }
+
+  async function handleHidePost(post: PostItem) {
+    if (!currentUser?.uid || !post.docId) return;
+    try {
+      await hidePostPermanent(currentUser.uid, post.docId);
+    } catch (err) {
+      setGlobalError(formatFirestoreErrorMessage(err));
+    }
+  }
+
+  async function handleToggleFollowAuthor(authorUid: string) {
+    if (!currentUser?.uid || !authorUid || authorUid === currentUser.uid) return;
+    const target = allUsers.find((u) => u.uid === authorUid);
+    if (!target) return;
+    try {
+      await toggleFollowPermanent(currentUser, target);
+    } catch (err) {
+      setGlobalError(formatFirestoreErrorMessage(err));
     }
   }
 
@@ -600,18 +740,48 @@ export default function App() {
     );
   }
 
+  function handleCommentDeleted(postId: number, commentId: number) {
+    setPosts((prev) =>
+      prev.map((p) => {
+        if (p.id !== postId) return p;
+        const nextComments = p.comments.filter((c) => c.id !== commentId);
+        return {
+          ...p,
+          comments: nextComments,
+          comments_count: nextComments.length,
+        };
+      }),
+    );
+  }
+
   async function handleDeletePost(postId: number) {
+    const target = posts.find((p) => p.id === postId);
+    if (!target?.docId) return;
     try {
-      await apiRequest(`/api/posts/${postId}`, {method: 'DELETE'});
+      await deletePostPermanent(target.docId, {
+        imageUrl: target.image_url,
+        videoUrl: target.video_url,
+      });
       setPosts((prev) => prev.filter((p) => p.id !== postId));
-    } catch {
-      // Ignore
+    } catch (err) {
+      setGlobalError(formatFirestoreErrorMessage(err));
+    }
+  }
+
+  function markPeerMessagesRead(peerId: number) {
+    if (!currentUser?.uid) return;
+    const list = messagesByPeer[peerId] || [];
+    const unreadDocIds = list
+      .filter((m) => m.receiver_uid === currentUser.uid && !m.read && m.docId)
+      .map((m) => m.docId!);
+    if (unreadDocIds.length > 0) {
+      void markMessagesReadPermanent(unreadDocIds);
     }
   }
 
   function handleOpenChat(peer: UserProfile) {
     setActiveChatPeer(peer);
-    loadMessagesForPeer(peer.id);
+    markPeerMessagesRead(peer.id);
     if (window.innerWidth >= 1024 && appView !== 'messages') {
       setFloatingChatOpen(true);
     } else {
@@ -619,43 +789,78 @@ export default function App() {
     }
   }
 
-  async function handleSendMessage(peerId: number, content: string) {
-    const data = await apiRequest<{message: ChatMessage}>(`/api/messages/${peerId}`, {
-      method: 'POST',
-      body: JSON.stringify({content}),
-    });
-    setMessagesByPeer((prev) => {
-      const existing = prev[peerId] || [];
-      if (existing.some((m) => m.id === data.message.id)) return prev;
-      return {...prev, [peerId]: [...existing, data.message]};
-    });
-    loadConversations();
+  async function handleSendMessage(peerId: number, payload: OutgoingChatPayload) {
+    if (!currentUser?.uid) return;
+    const peer =
+      activeChatPeer?.id === peerId
+        ? activeChatPeer
+        : allUsers.find((u) => u.id === peerId) ||
+          conversations.find((c) => c.user.id === peerId)?.user;
+    if (!peer?.uid) {
+      setGlobalError('Recipient account is not available in Cloud Firestore yet.');
+      return;
+    }
+    try {
+      await sendMessagePermanent(currentUser.uid, peer.uid, payload.content, undefined, {
+        messageType: payload.messageType,
+        mediaUrl: payload.mediaUrl,
+        mediaName: payload.mediaName,
+        mediaSize: payload.mediaSize,
+        voiceDurationSec: payload.voiceDurationSec,
+        locationLat: payload.locationLat,
+        locationLng: payload.locationLng,
+        locationLabel: payload.locationLabel,
+      });
+    } catch (err) {
+      setGlobalError(formatFirestoreErrorMessage(err));
+      throw err;
+    }
+  }
+
+  function handleStartCall(peer: UserProfile, type: CallType) {
+    if (!currentUser?.uid || !peer.uid) {
+      setGlobalError('Both accounts must be verified to place a live Audio or Video call.');
+      return;
+    }
+    setIncomingCall(null);
+    setOutgoingCallTarget({peer, type});
+  }
+
+  async function handleStartGroupCall(group: ChatGroupDoc, type: CallType) {
+    if (!currentUser?.uid) return;
+    try {
+      const created = await startGroupCallPermanent(group, currentUser, type);
+      setActiveGroupCall(created);
+    } catch (err) {
+      setGlobalError(formatFirestoreErrorMessage(err));
+    }
   }
 
   function handleTyping(peerId: number, isTyping: boolean) {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({event: 'chat:typing', payload: {receiverId: peerId, isTyping}}),
-      );
-    }
+    if (!currentUser?.uid) return;
+    const peer =
+      activeChatPeer?.id === peerId
+        ? activeChatPeer
+        : allUsers.find((u) => u.id === peerId) ||
+          conversations.find((c) => c.user.id === peerId)?.user;
+    if (!peer?.uid) return;
+    void setTypingStatePermanent(currentUser.uid, peer.uid, isTyping);
   }
 
   async function handleMarkAllRead() {
-    try {
-      await apiRequest('/api/notifications/read-all', {method: 'POST'});
-      setNotifications((prev) => prev.map((n) => ({...n, read: true})));
-    } catch {
-      // Ignore
-    }
+    const unreadIds = notifications.filter((n) => !n.read && n.docId).map((n) => n.docId!);
+    if (unreadIds.length === 0) return;
+    await markAllNotificationsReadPermanent(unreadIds);
   }
 
   async function handleNotificationClick(notif: NotificationItem) {
-    if (!notif.read) {
-      apiRequest(`/api/notifications/${notif.id}/read`, {method: 'POST'}).catch(() => {});
-      setNotifications((prev) => prev.map((n) => (n.id === notif.id ? {...n, read: true} : n)));
+    if (!notif.read && notif.docId) {
+      void markNotificationReadPermanent(notif.docId);
     }
     if (notif.type === 'friend_request') {
       navigateApp('friends');
+    } else if (notif.type === 'call' || notif.type === 'message') {
+      navigateApp('messages');
     } else if (
       (notif.type === 'friend_accepted' || notif.type === 'follow') &&
       notif.actor_id
@@ -674,18 +879,22 @@ export default function App() {
           <p className="text-2xl font-display font-extrabold text-[#1877F2] dark:text-[#3B82F6]">
             Verve
           </p>
-          <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">Loading your session...</p>
+          <p className="text-xs text-[#65676B] dark:text-[#9CA3AF]">
+            Loading your Cloud Firestore profile...
+          </p>
         </div>
       </div>
     );
   }
 
-  // Mandatory Entry Gate for unauthenticated users
+  // Mandatory Entry Gate for unauthenticated OR unverified-email users
   if (!currentUser) {
     return (
       <AuthGate
         authView={authView}
         resetTokenFromUrl={resetTokenFromUrl}
+        pendingVerificationUser={pendingVerificationUser}
+        onPendingVerificationChange={setPendingVerificationUser}
         onNavigateAuth={navigateAuth}
         onAuthenticated={handleAuthenticated}
         theme={theme}
@@ -699,9 +908,63 @@ export default function App() {
   const pendingRequests = network.incomingRequests.length;
   const resolvedProfileId = activeProfileId ?? currentUser.id;
   const onlineSet = new Set(onlineUserIds);
+  const callOverlayVisible = Boolean(outgoingCallTarget || incomingCall);
 
   return (
     <div className="min-h-screen bg-[#F4F6F9] dark:bg-[#0E1014] text-[#0F172A] dark:text-[#F1F5F9] pb-16 md:pb-8">
+      {/* Real-time Facebook Messenger-style 1-on-1 Audio & Video Call Overlay */}
+      {callOverlayVisible && (
+        <CallOverlay
+          currentUser={currentUser}
+          outgoingTarget={outgoingCallTarget}
+          incomingCall={incomingCall}
+          inviteCandidates={network.friends.length > 0 ? network.friends : allUsers}
+          onCloseCall={() => {
+            setOutgoingCallTarget(null);
+            setIncomingCall(null);
+          }}
+        />
+      )}
+
+      {/* Real-time Multi-Member Group Audio & Video Call Overlay */}
+      {(activeGroupCall || incomingGroupCall) && (
+        <GroupCallOverlay
+          call={(activeGroupCall || incomingGroupCall)!}
+          mode={activeGroupCall ? 'active' : 'incoming'}
+          currentUser={currentUser}
+          allUsers={allUsers}
+          onAcceptIncoming={(acceptedCall) => {
+            setActiveGroupCall(acceptedCall);
+          }}
+          onDeclineIncoming={(callId) => {
+            setDeclinedGroupCallIds((prev) => {
+              const next = new Set(prev);
+              next.add(callId);
+              return next;
+            });
+          }}
+          onCallEnded={() => {
+            setActiveGroupCall(null);
+          }}
+        />
+      )}
+
+      {/* Real Firestore error banner (never hides failures!) */}
+      {globalError && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 w-[92%] max-w-lg rounded-2xl bg-[#FEF2F2] dark:bg-[#3B181A] border border-[#FECACA] dark:border-[#7F1D1D] px-4 py-3 text-xs sm:text-sm text-[#B91C1C] dark:text-[#FCA5A5] shadow-xl flex items-start gap-2.5">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span className="flex-1">{globalError}</span>
+          <button
+            type="button"
+            onClick={() => setGlobalError(null)}
+            aria-label="Dismiss error"
+            className="p-0.5 rounded hover:bg-black/10 cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Top Bar: Clean 3-zone contract */}
       <header className="sticky top-0 z-30 h-14 sm:h-16 bg-white/90 dark:bg-[#16191F]/90 backdrop-blur-xl border-b border-[#E5E8EE] dark:border-[#252A34]">
         <div className="max-w-[1440px] mx-auto px-4 sm:px-6 h-full flex items-center justify-between gap-8">
@@ -808,7 +1071,7 @@ export default function App() {
         <div className="flex items-start justify-center gap-6">
           {/* LEFT RAIL (Desktop) */}
           <aside className="hidden lg:flex flex-col gap-4 w-[260px] shrink-0 sticky top-[5.25rem]">
-            {/* Account Summary Card with subtle cover accent */}
+            {/* Account Summary Card */}
             <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
               <div className="h-14 w-full bg-[#1E293B] relative overflow-hidden">
                 {currentUser.cover_url && (
@@ -863,7 +1126,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Search People */}
+            {/* Search People (Live Firestore Users) */}
             <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-3.5 space-y-2.5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
               <div className="relative">
                 <Search className="w-4 h-4 text-[#65676B] dark:text-[#9CA3AF] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -965,7 +1228,12 @@ export default function App() {
           {/* CENTER VIEWPORT */}
           <main
             className={`flex-1 min-w-0 ${
-              appView === 'profile' || appView === 'messages' ? 'max-w-[820px]' : 'max-w-[660px]'
+              appView === 'profile' ||
+              appView === 'messages' ||
+              appView === 'groups' ||
+              appView === 'pages'
+                ? 'max-w-[820px]'
+                : 'max-w-[660px]'
             }`}
           >
             {/* Mobile quick theme & sign-out strip when viewing Profile */}
@@ -1030,7 +1298,6 @@ export default function App() {
                     </button>
                   </div>
 
-                  {/* Mobile theme quick toggle */}
                   <button
                     type="button"
                     onClick={toggleTheme}
@@ -1061,17 +1328,17 @@ export default function App() {
                       </div>
                     ))}
                   </div>
-                ) : posts.length === 0 ? (
+                ) : visiblePosts.length === 0 ? (
                   <div className="bg-white dark:bg-[#1C1E21] border border-[#E4E6EB] dark:border-[#2E3035] rounded-2xl p-10 text-center space-y-2">
                     <p className="text-base font-display font-semibold text-[#111827] dark:text-white">
                       {feedFilter === 'following'
                         ? 'No posts from friends or people you follow yet'
-                        : 'Your feed is quiet'}
+                        : 'No posts yet'}
                     </p>
                     <p className="text-sm text-[#65676B] dark:text-[#9CA3AF]">
                       {feedFilter === 'following'
                         ? 'Connect with people in Friends or switch to All Updates.'
-                        : 'Share a status, photo, or video above to start the conversation.'}
+                        : 'Share your first text, photo, or video above — it saves permanently to Cloud Firestore.'}
                     </p>
                     {feedFilter === 'following' && (
                       <button
@@ -1084,15 +1351,20 @@ export default function App() {
                     )}
                   </div>
                 ) : (
-                  posts.map((post) => (
+                  visiblePosts.map((post) => (
                     <PostCard
                       key={post.id}
                       post={post}
                       currentUser={currentUser}
+                      isFollowingAuthor={network.followingIds.includes(post.user_id)}
                       onOpenProfile={(uid) => navigateApp('profile', uid)}
+                      onOpenPage={handleOpenPage}
                       onToggleLike={handleToggleLike}
                       onToggleSave={handleToggleSave}
+                      onHidePost={handleHidePost}
+                      onToggleFollowAuthor={handleToggleFollowAuthor}
                       onCommentAdded={handleCommentAdded}
+                      onCommentDeleted={handleCommentDeleted}
                       onDeletePost={handleDeletePost}
                     />
                   ))
@@ -1105,51 +1377,78 @@ export default function App() {
               <ProfileView
                 profileId={resolvedProfileId}
                 currentUser={currentUser}
+                allUsers={allUsers}
+                allPosts={decoratedPosts}
+                pages={pages}
+                network={network}
                 onUserUpdated={handleUserUpdated}
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
+                onOpenPage={handleOpenPage}
+                onOpenPagesHub={() => {
+                  setActivePageId(null);
+                  navigateApp('pages');
+                }}
                 onOpenChat={handleOpenChat}
+                onStartCall={handleStartCall}
                 onOpenAccountsCentre={() => {
                   setSettingsSection('personal-details');
                   navigateApp('settings');
                 }}
-                onNetworkChanged={() => {
-                  loadNetwork();
-                  loadConversations();
+                onNetworkChanged={() => {}}
+                onPostMutated={() => {}}
+                onPostCreated={(newPost) => {
+                  setPosts((prev) =>
+                    prev.some((p) => p.id === newPost.id) ? prev : [newPost, ...prev],
+                  );
                 }}
-                onPostMutated={() => loadPosts(feedFilter)}
+                onToggleLikePost={handleToggleLike}
+                onToggleSavePost={handleToggleSave}
+                onHidePost={handleHidePost}
+                onToggleFollowAuthor={handleToggleFollowAuthor}
+                onCommentAddedPost={handleCommentAdded}
+                onCommentDeletedPost={handleCommentDeleted}
+                onDeletePostItem={handleDeletePost}
               />
             )}
 
             {/* FRIENDS VIEW */}
             {appView === 'friends' && (
               <FriendsView
+                currentUser={currentUser}
                 network={network}
                 onlineUserIds={onlineUserIds}
-                onRefresh={() => {
-                  loadNetwork();
-                  loadConversations();
-                }}
+                onRefresh={() => {}}
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
                 onOpenChat={handleOpenChat}
+                onStartCall={handleStartCall}
               />
             )}
 
-            {/* MESSAGES VIEW */}
-            {appView === 'messages' && (
+            {/* MESSAGES & REAL-TIME GROUP CHATS VIEW */}
+            {(appView === 'messages' || appView === 'groups') && (
               <MessagesPage
                 currentUser={currentUser}
+                allUsers={allUsers}
+                friends={network.friends}
                 conversations={conversations}
+                groups={groups}
                 activePeer={activeChatPeer}
+                activeGroupId={activeGroupId}
                 messagesByPeer={messagesByPeer}
                 onlineUserIds={onlineUserIds}
+                presenceByUid={presenceByUid}
                 typingUsers={typingUsers}
+                initialListMode={appView === 'groups' ? 'groups' : undefined}
                 onSelectPeer={(peer) => {
                   setActiveChatPeer(peer);
-                  loadMessagesForPeer(peer.id);
+                  markPeerMessagesRead(peer.id);
                 }}
+                onSelectGroup={(gid) => setActiveGroupId(gid)}
                 onSendMessage={handleSendMessage}
                 onTyping={handleTyping}
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
+                onStartCall={handleStartCall}
+                onStartGroupCall={handleStartGroupCall}
               />
             )}
 
@@ -1169,8 +1468,7 @@ export default function App() {
                 theme={theme}
                 onToggleTheme={toggleTheme}
                 onNavigate={navigateApp}
-                onSwitchedAccount={(switchedUser, newToken) => {
-                  setAuthToken(newToken);
+                onSwitchedAccount={(switchedUser) => {
                   setCurrentUser(switchedUser);
                   setFloatingChatOpen(false);
                   setActiveChatPeer(null);
@@ -1195,7 +1493,10 @@ export default function App() {
                 onToggleTheme={toggleTheme}
                 onBackToMenu={() => navigateApp('menu')}
                 onOpenProfile={() => navigateApp('profile', currentUser.id)}
-                onOpenPages={() => navigateApp('pages')}
+                onOpenPages={() => {
+                  setActivePageId(null);
+                  navigateApp('pages');
+                }}
                 onUserUpdated={handleUserUpdated}
               />
             )}
@@ -1203,6 +1504,9 @@ export default function App() {
             {/* MENU SHORTCUT HUB VIEWS */}
             {appView === 'dashboard' && (
               <DashboardView
+                currentUser={currentUser}
+                posts={decoratedPosts}
+                network={network}
                 onBack={() => navigateApp('menu')}
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
               />
@@ -1211,44 +1515,83 @@ export default function App() {
             {appView === 'saved' && (
               <SavedPostsView
                 currentUser={currentUser}
+                posts={decoratedPosts}
+                followingIds={network.followingIds}
                 onBack={() => navigateApp('menu')}
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
+                onOpenPage={handleOpenPage}
                 onToggleLike={handleToggleLike}
                 onToggleSave={handleToggleSave}
+                onHidePost={handleHidePost}
+                onToggleFollowAuthor={handleToggleFollowAuthor}
                 onCommentAdded={handleCommentAdded}
+                onCommentDeleted={handleCommentDeleted}
                 onDeletePost={handleDeletePost}
               />
             )}
-
-            {appView === 'groups' && <GroupsView onBack={() => navigateApp('menu')} />}
 
             {appView === 'marketplace' && (
               <MarketplaceView
                 onBack={() => navigateApp('menu')}
                 onMessageSeller={(sellerId, sellerName, sellerAvatar) => {
-                  handleOpenChat({
-                    id: sellerId,
-                    name: sellerName,
-                    avatar_url: sellerAvatar,
-                    email: null,
-                    phone: null,
-                    bio: '',
-                    location: '',
-                    work: '',
-                    cover_url: '',
-                    created_at: '',
-                  });
+                  const found = allUsers.find((u) => u.id === sellerId);
+                  handleOpenChat(
+                    found || {
+                      id: sellerId,
+                      name: sellerName,
+                      avatar_url: sellerAvatar,
+                      email: null,
+                      phone: null,
+                      bio: '',
+                      location: '',
+                      work: '',
+                      cover_url: '',
+                      created_at: '',
+                    },
+                  );
                 }}
               />
             )}
 
             {appView === 'events' && <EventsView onBack={() => navigateApp('menu')} />}
 
-            {appView === 'pages' && <PagesView onBack={() => navigateApp('menu')} />}
+            {/* FACEBOOK-STYLE PAGES HUB & PAGE PROFILES */}
+            {appView === 'pages' && (
+              <PagesHubView
+                currentUser={currentUser}
+                allUsers={allUsers}
+                pages={pages}
+                allPosts={decoratedPosts}
+                activePageId={activePageId}
+                followingIds={network.followingIds}
+                onSelectPage={(pid) => {
+                  setActivePageId(pid);
+                  const url = pid ? `/pages?page=${encodeURIComponent(pid)}` : '/pages';
+                  window.history.pushState({}, '', url);
+                }}
+                onBack={() => {
+                  setActivePageId(null);
+                  navigateApp('menu');
+                }}
+                onOpenProfile={(uid) => navigateApp('profile', uid)}
+                onPostCreated={(newPost) => {
+                  setPosts((prev) =>
+                    prev.some((p) => p.id === newPost.id) ? prev : [newPost, ...prev],
+                  );
+                }}
+                onToggleLike={handleToggleLike}
+                onToggleSave={handleToggleSave}
+                onHidePost={handleHidePost}
+                onToggleFollowAuthor={handleToggleFollowAuthor}
+                onCommentAdded={handleCommentAdded}
+                onCommentDeleted={handleCommentDeleted}
+                onDeletePost={handleDeletePost}
+              />
+            )}
 
             {appView === 'reels' && (
               <ReelsView
-                posts={posts}
+                posts={decoratedPosts}
                 onBack={() => navigateApp('menu')}
                 onToggleLike={handleToggleLike}
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
@@ -1258,12 +1601,15 @@ export default function App() {
             {appView === 'memories' && (
               <MemoriesView
                 currentUser={currentUser}
-                posts={posts}
+                posts={decoratedPosts}
                 onBack={() => navigateApp('menu')}
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
+                onOpenPage={handleOpenPage}
                 onToggleLike={handleToggleLike}
                 onToggleSave={handleToggleSave}
+                onHidePost={handleHidePost}
                 onCommentAdded={handleCommentAdded}
+                onCommentDeleted={handleCommentDeleted}
                 onDeletePost={handleDeletePost}
               />
             )}
@@ -1274,7 +1620,7 @@ export default function App() {
                 onBack={() => navigateApp('menu')}
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
                 onSendWish={async (user, text) => {
-                  await handleSendMessage(user.id, text);
+                  await handleSendMessage(user.id, {content: text, messageType: 'text'});
                 }}
               />
             )}
@@ -1283,7 +1629,7 @@ export default function App() {
           </main>
 
           {/* RIGHT REAL-TIME CHAT & NOTIFICATIONS RAIL (Desktop) */}
-          {appView !== 'messages' && (
+          {appView !== 'messages' && appView !== 'groups' && (
             <aside className="hidden xl:block w-[300px] shrink-0 sticky top-[5.25rem]">
               <RightRailPanel
                 conversations={conversations}
@@ -1298,8 +1644,8 @@ export default function App() {
         </div>
       </div>
 
-      {/* Desktop Floating Real-Time Chat Drawer */}
-      {floatingChatOpen && activeChatPeer && appView !== 'messages' && (
+      {/* Desktop Floating Real-Time Chat Drawer (with Rich Messenger Input + Audio & Video Call buttons) */}
+      {floatingChatOpen && activeChatPeer && appView !== 'messages' && appView !== 'groups' && (
         <div className="hidden lg:block fixed bottom-0 right-6 z-40">
           <ChatConversationWindow
             compact
@@ -1307,10 +1653,12 @@ export default function App() {
             currentUser={currentUser}
             messages={messagesByPeer[activeChatPeer.id] || []}
             isPeerOnline={onlineSet.has(activeChatPeer.id)}
+            peerLastSeen={activeChatPeer.uid ? presenceByUid[activeChatPeer.uid]?.lastSeen : undefined}
             isPeerTyping={Boolean(typingUsers[activeChatPeer.id])}
             onSendMessage={handleSendMessage}
             onTyping={handleTyping}
             onOpenProfile={(uid) => navigateApp('profile', uid)}
+            onStartCall={handleStartCall}
             onClose={() => setFloatingChatOpen(false)}
           />
         </div>

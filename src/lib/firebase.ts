@@ -6,6 +6,7 @@ import {
   GoogleAuthProvider,
   RecaptchaVerifier,
   sendEmailVerification,
+  sendPasswordResetEmail,
   setPersistence,
   signInWithEmailAndPassword,
   signInWithPhoneNumber,
@@ -23,16 +24,21 @@ import {
   serverTimestamp,
   writeBatch,
 } from 'firebase/firestore';
+import {getStorage} from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
 import type {UserProfile} from '../types';
 
 export const firebaseApp = initializeApp(firebaseConfig);
 export const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(firebaseApp);
+export const storage = getStorage(firebaseApp);
 
-// Keep Firebase auth state persisted cleanly across refreshes
-setPersistence(auth, browserLocalPersistence).catch(() => {
-  // Ignore if browser restricts persistence in private iframe mode
+// Enforce browserLocalPersistence so users remain logged in after closing and reopening the app
+export const authPersistenceReady: Promise<void> = setPersistence(
+  auth,
+  browserLocalPersistence,
+).catch(() => {
+  // Ignore only if browser blocks persistence in private iframe mode
 });
 
 export enum OperationType {
@@ -87,6 +93,28 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
+export function formatFirestoreErrorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err || 'Database error');
+  try {
+    const parsed = JSON.parse(raw) as Partial<FirestoreErrorInfo>;
+    if (parsed && typeof parsed.error === 'string') {
+      if (/permission|insufficient/i.test(parsed.error)) {
+        return `Permission denied while saving to Firestore (${parsed.path || 'database'}). Make sure your email is verified and try again.`;
+      }
+      if (/offline|network/i.test(parsed.error)) {
+        return 'Cannot reach Cloud Firestore right now. Check your internet connection and try again.';
+      }
+      if (/quota/i.test(parsed.error)) {
+        return 'Cloud Firestore daily free quota exceeded. Please try again tomorrow or upgrade your plan.';
+      }
+      return `Firestore error: ${parsed.error}`;
+    }
+  } catch {
+    // Not JSON
+  }
+  return raw;
+}
+
 // Validate Firestore connectivity at startup
 async function testConnection() {
   try {
@@ -107,19 +135,27 @@ function clampString(value: string | null | undefined, maxLength: number): strin
   return String(value || '').trim().slice(0, maxLength);
 }
 
+export function isFirebaseUserVerified(user: User | null | undefined): boolean {
+  if (!user) return false;
+  return user.emailVerified === true || Boolean(user.phoneNumber);
+}
+
 /**
  * Persist verified user's public & owner-only private profile into Cloud Firestore
  * following the split-collection blueprint (users/{uid} + users/{uid}/private/info).
+ * Throws real Firestore errors via handleFirestoreError — never silently fakes a save!
  */
 export async function syncUserProfileToFirestore(
   user: User,
   profile: Partial<UserProfile> & {name: string},
   authMethod: FirebaseAuthMethod,
 ): Promise<void> {
-  if (!user.uid) return;
-  // Security rules strictly mandate verified email or verified phone
-  const isVerified = user.emailVerified === true || Boolean(user.phoneNumber);
-  if (!isVerified) return;
+  if (!user.uid) {
+    throw new Error('Not signed in with Firebase Auth.');
+  }
+  if (!isFirebaseUserVerified(user)) {
+    throw new Error('Please verify your email address before saving profile changes.');
+  }
 
   const publicPath = `users/${user.uid}`;
   const privatePath = `users/${user.uid}/private/info`;
@@ -147,8 +183,9 @@ export async function syncUserProfileToFirestore(
       bio: clampString(profile.bio, 320),
       location: clampString(profile.location, 80),
       work: clampString(profile.work, 100),
-      avatarUrl: clampString(profile.avatar_url || user.photoURL, 2048),
-      coverUrl: clampString(profile.cover_url, 2048),
+      avatarUrl: clampString(profile.avatar_url ?? user.photoURL ?? '', 450000),
+      coverUrl: clampString(profile.cover_url ?? '', 450000),
+      visibility: 'public',
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -158,8 +195,9 @@ export async function syncUserProfileToFirestore(
       bio: clampString(profile.bio, 320),
       location: clampString(profile.location, 80),
       work: clampString(profile.work, 100),
-      avatarUrl: clampString(profile.avatar_url || user.photoURL, 2048),
-      coverUrl: clampString(profile.cover_url, 2048),
+      avatarUrl: clampString(profile.avatar_url ?? user.photoURL ?? '', 450000),
+      coverUrl: clampString(profile.cover_url ?? '', 450000),
+      visibility: 'public',
       updatedAt: serverTimestamp(),
     });
   }
@@ -201,6 +239,7 @@ export async function loadUserProfileFromFirestore(user: User): Promise<{
   email?: string;
   phone?: string;
   date_of_birth?: string;
+  created_at?: string;
 } | null> {
   if (!user.uid) return null;
   const publicRef = doc(db, 'users', user.uid);
@@ -210,6 +249,11 @@ export async function loadUserProfileFromFirestore(user: User): Promise<{
     if (!pubSnap.exists() && !privSnap.exists()) return null;
     const pub = pubSnap.exists() ? pubSnap.data() : {};
     const priv = privSnap.exists() ? privSnap.data() : {};
+    const createdAtTs = pub.createdAt || priv.createdAt;
+    const createdAtIso =
+      createdAtTs && typeof createdAtTs.toDate === 'function'
+        ? createdAtTs.toDate().toISOString()
+        : new Date().toISOString();
     return {
       name: typeof pub.name === 'string' ? pub.name : undefined,
       bio: typeof pub.bio === 'string' ? pub.bio : undefined,
@@ -220,6 +264,7 @@ export async function loadUserProfileFromFirestore(user: User): Promise<{
       email: typeof priv.email === 'string' && priv.email ? priv.email : undefined,
       phone: typeof priv.phone === 'string' && priv.phone ? priv.phone : undefined,
       date_of_birth: typeof priv.dateOfBirth === 'string' ? priv.dateOfBirth : undefined,
+      created_at: createdAtIso,
     };
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, `users/${user.uid}`);
@@ -227,6 +272,7 @@ export async function loadUserProfileFromFirestore(user: User): Promise<{
 }
 
 export async function signInWithGooglePopup(): Promise<{user: User; idToken: string}> {
+  await authPersistenceReady;
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({prompt: 'select_account'});
   const cred = await signInWithPopup(auth, provider);
@@ -251,6 +297,7 @@ export async function sendFirebasePhoneOtp(
   e164Phone: string,
   containerId: string,
 ): Promise<ConfirmationResult> {
+  await authPersistenceReady;
   clearPhoneRecaptcha();
   const container = document.getElementById(containerId);
   if (!container) {
@@ -268,31 +315,85 @@ export async function sendFirebasePhoneOtp(
   }
 }
 
+/**
+ * Create a new Firebase Email + Password account and immediately send Firebase email verification.
+ * Caller MUST block app entry until user.emailVerified === true.
+ */
+export async function registerWithEmailAndSendVerification(
+  email: string,
+  password: string,
+  displayName: string,
+): Promise<{user: User}> {
+  await authPersistenceReady;
+  const cred = await createUserWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
+  if (displayName.trim()) {
+    await updateProfile(cred.user, {displayName: displayName.trim()}).catch(() => {});
+  }
+  await sendEmailVerification(cred.user);
+  return {user: cred.user};
+}
+
+/**
+ * Sign in via Firebase Email + Password and refresh emailVerified status.
+ */
+export async function signInWithEmailFirebase(
+  email: string,
+  password: string,
+): Promise<{user: User; emailVerified: boolean; idToken: string}> {
+  await authPersistenceReady;
+  const cred = await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
+  await cred.user.reload();
+  const freshUser = auth.currentUser || cred.user;
+  const idToken = await freshUser.getIdToken(true);
+  return {
+    user: freshUser,
+    emailVerified: freshUser.emailVerified === true,
+    idToken,
+  };
+}
+
+export async function resendCurrentUserEmailVerification(): Promise<void> {
+  if (!auth.currentUser) {
+    throw new Error('No pending account found. Please sign in or create an account again.');
+  }
+  await sendEmailVerification(auth.currentUser);
+}
+
+export async function checkCurrentUserEmailVerified(): Promise<{
+  verified: boolean;
+  user: User;
+  idToken: string;
+}> {
+  const current = auth.currentUser;
+  if (!current) {
+    throw new Error('Session expired. Please sign in again.');
+  }
+  await current.reload();
+  const refreshed = auth.currentUser || current;
+  const idToken = await refreshed.getIdToken(true);
+  return {
+    verified: refreshed.emailVerified === true,
+    user: refreshed,
+    idToken,
+  };
+}
+
+export async function sendFirebasePasswordReset(email: string): Promise<void> {
+  await authPersistenceReady;
+  await sendPasswordResetEmail(auth, email.trim().toLowerCase());
+}
+
 export async function tryFirebaseEmailSignIn(
   email: string,
   password: string,
 ): Promise<{user: User; idToken: string} | null> {
   try {
+    await authPersistenceReady;
     const cred = await signInWithEmailAndPassword(auth, email, password);
-    const idToken = await cred.user.getIdToken(true);
-    return {user: cred.user, idToken};
-  } catch {
-    return null;
-  }
-}
-
-export async function tryFirebaseEmailRegister(
-  email: string,
-  password: string,
-  displayName: string,
-): Promise<{user: User; verificationSent: boolean} | null> {
-  try {
-    const cred = await createUserWithEmailAndPassword(auth, email, password);
-    if (displayName) {
-      await updateProfile(cred.user, {displayName}).catch(() => {});
-    }
-    await sendEmailVerification(cred.user);
-    return {user: cred.user, verificationSent: true};
+    await cred.user.reload();
+    const fresh = auth.currentUser || cred.user;
+    const idToken = await fresh.getIdToken(true);
+    return {user: fresh, idToken};
   } catch {
     return null;
   }

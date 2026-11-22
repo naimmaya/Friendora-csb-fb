@@ -39,19 +39,17 @@ import {
   X,
 } from 'lucide-react';
 import {
-  clearVaultSessionToken,
   listVaultAccounts,
   removeVaultAccount,
   saveAccountToVault,
-  verifyCredentialsInVault,
   type VaultAccountRecord,
 } from '../lib/accountVault';
-import {apiRequest, fetchMeWithToken, getAuthToken, setAuthToken} from '../lib/api';
 import {
-  loadUserProfileFromFirestore,
+  formatFirestoreErrorMessage,
+  signInWithEmailFirebase,
   signInWithGooglePopup,
-  syncUserProfileToFirestore,
 } from '../lib/firebase';
+import {ensureAndLoadUserProfile} from '../lib/firestoreStore';
 import type {AppView, SettingsSection, UserProfile} from '../types';
 import {Avatar} from './MediaImage';
 
@@ -219,10 +217,10 @@ export function MenuView({
   const [switchError, setSwitchError] = useState<string | null>(null);
 
   const refreshSavedAccounts = useCallback(async () => {
-    const activeToken = getAuthToken();
-    if (activeToken) {
-      await saveAccountToVault({user: currentUser, sessionToken: activeToken}).catch(() => {});
-    }
+    await saveAccountToVault({
+      user: currentUser,
+      firebaseUid: currentUser.uid || null,
+    }).catch(() => {});
     const list = await listVaultAccounts().catch(() => []);
     setVaultAccounts(list);
   }, [currentUser]);
@@ -251,33 +249,10 @@ export function MenuView({
 
   async function handleTapSavedAccount(acc: VaultAccountRecord) {
     setSwitchError(null);
-
-    // Path A: Instant 1-tap Facebook-style switch using this account's saved device session token
-    if (acc.sessionToken) {
-      setSwitchingVaultId(acc.id);
-      try {
-        const res = await fetchMeWithToken<{user: UserProfile}>(acc.sessionToken);
-        await saveAccountToVault({
-          user: res.user,
-          authMethod: acc.authMethod,
-          firebaseUid: acc.firebaseUid,
-          sessionToken: acc.sessionToken,
-        });
-        setAuthToken(acc.sessionToken);
-        onSwitchedAccount(res.user, acc.sessionToken);
-        return;
-      } catch {
-        // Session expired or was logged out — clear stale token and open inline unlock
-        await clearVaultSessionToken(acc.id).catch(() => {});
-        setVaultAccounts((prev) =>
-          prev.map((item) => (item.id === acc.id ? {...item, sessionToken: null} : item)),
-        );
-      } finally {
-        setSwitchingVaultId(null);
-      }
+    if (acc.authMethod === 'google') {
+      await handleUnlockWithGoogle();
+      return;
     }
-
-    // Path B: Account was logged out or server restarted — open compact inline login right here
     setUnlockTarget(acc);
     setUnlockPassword('');
     setShowUnlockPassword(false);
@@ -288,83 +263,38 @@ export function MenuView({
     if (!unlockTarget) return;
     setSwitchError(null);
 
-    const identifier = unlockTarget.email || unlockTarget.phone || '';
+    const identifier = unlockTarget.email || '';
     if (!identifier || !unlockPassword) {
       setSwitchError('Enter your password to switch into this account.');
       return;
     }
 
     setUnlockBusy(true);
+    setSwitchingVaultId(unlockTarget.id);
     try {
-      // Layer 1: Primary Express login
-      const data = await apiRequest<{token: string; user: UserProfile}>('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({identifier, password: unlockPassword}),
-      });
+      const {user: fbUser, emailVerified, idToken} = await signInWithEmailFirebase(
+        identifier,
+        unlockPassword,
+      );
+      if (!emailVerified) {
+        setSwitchError('Please verify this Gmail address before switching into it.');
+        return;
+      }
+      const profile = await ensureAndLoadUserProfile(fbUser, {authMethod: 'email_otp'});
       await saveAccountToVault({
-        user: data.user,
-        password: unlockPassword,
-        authMethod: unlockTarget.authMethod,
-        firebaseUid: unlockTarget.firebaseUid,
-        sessionToken: data.token,
-      });
-      setAuthToken(data.token);
+        user: profile,
+        authMethod: 'email_otp',
+        firebaseUid: fbUser.uid,
+        sessionToken: idToken,
+      }).catch(() => {});
       setUnlockTarget(null);
       setUnlockPassword('');
-      onSwitchedAccount(data.user, data.token);
-      return;
-    } catch (primaryErr) {
-      // Layer 2: Permanent Vault PBKDF2 verify + automatic /api/auth/restore if server restarted
-      try {
-        const verified = await verifyCredentialsInVault(identifier, unlockPassword);
-        if (verified) {
-          const restored = await apiRequest<{token: string; user: UserProfile}>(
-            '/api/auth/restore',
-            {
-              method: 'POST',
-              body: JSON.stringify({
-                name: verified.name,
-                email: verified.email,
-                phone: verified.phone,
-                password: unlockPassword,
-                bio: verified.bio,
-                location: verified.location,
-                work: verified.work,
-                avatar_url: verified.avatar_url,
-                cover_url: verified.cover_url,
-                date_of_birth: verified.date_of_birth,
-                firebaseUid: verified.firebaseUid,
-              }),
-            },
-          );
-          await saveAccountToVault({
-            user: restored.user,
-            password: unlockPassword,
-            authMethod: verified.authMethod,
-            firebaseUid: verified.firebaseUid,
-            sessionToken: restored.token,
-          });
-          setAuthToken(restored.token);
-          setUnlockTarget(null);
-          setUnlockPassword('');
-          onSwitchedAccount(restored.user, restored.token);
-          return;
-        }
-      } catch {
-        // Fall through to primary error
-      }
-
-      if (unlockTarget.authMethod === 'google' && !unlockTarget.passwordHash) {
-        setSwitchError(
-          'This Gmail account uses Google Sign-In. Tap "Continue with Google" below to switch.',
-        );
-      } else {
-        setSwitchError(
-          primaryErr instanceof Error ? primaryErr.message : 'Incorrect password. Please try again.',
-        );
-      }
+      onSwitchedAccount(profile, idToken);
+    } catch (err) {
+      setSwitchError(formatFirestoreErrorMessage(err));
     } finally {
       setUnlockBusy(false);
+      setSwitchingVaultId(null);
     }
   }
 
@@ -373,26 +303,17 @@ export function MenuView({
     setGoogleSwitchBusy(true);
     try {
       const {user: fbUser, idToken} = await signInWithGooglePopup();
-      const fsProfile = await loadUserProfileFromFirestore(fbUser).catch(() => null);
-      const data = await apiRequest<{token: string; user: UserProfile}>('/api/auth/firebase-auth', {
-        method: 'POST',
-        body: JSON.stringify({
-          firebaseIdToken: idToken,
-          ...(fsProfile || {}),
-        }),
-      });
-      await syncUserProfileToFirestore(fbUser, data.user, 'google').catch(() => {});
+      const profile = await ensureAndLoadUserProfile(fbUser, {authMethod: 'google'});
       await saveAccountToVault({
-        user: data.user,
+        user: profile,
         authMethod: 'google',
         firebaseUid: fbUser.uid,
-        sessionToken: data.token,
-      });
-      setAuthToken(data.token);
+        sessionToken: idToken,
+      }).catch(() => {});
       setUnlockTarget(null);
-      onSwitchedAccount(data.user, data.token);
+      onSwitchedAccount(profile, idToken);
     } catch (err) {
-      setSwitchError(err instanceof Error ? err.message : 'Could not sign in with Google.');
+      setSwitchError(formatFirestoreErrorMessage(err));
     } finally {
       setGoogleSwitchBusy(false);
     }
