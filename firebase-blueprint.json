@@ -1,0 +1,142 @@
+{
+  "entities": {
+    "UserPublicProfile": {
+      "title": "UserPublicProfile",
+      "description": "Publicly visible profile details for a verified Verve member (contains no PII).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID matching the document ID."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 60,
+          "description": "Display name."
+        },
+        "bio": {
+          "type": "string",
+          "maxLength": 320,
+          "description": "Short biography."
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "City or region."
+        },
+        "work": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Role or workplace."
+        },
+        "avatarUrl": {
+          "type": "string",
+          "maxLength": 2048,
+          "description": "Profile avatar URL."
+        },
+        "coverUrl": {
+          "type": "string",
+          "maxLength": 2048,
+          "description": "Profile cover banner URL."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last-updated timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "name",
+        "bio",
+        "location",
+        "work",
+        "avatarUrl",
+        "coverUrl",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPrivateAccount": {
+      "title": "UserPrivateAccount",
+      "description": "Owner-only private PII and verification metadata for a Verve account.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the account owner."
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Verified email address or empty string."
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 24,
+          "description": "Verified E.164 phone number or empty string."
+        },
+        "authMethod": {
+          "type": "string",
+          "enum": ["google", "email_otp", "phone_otp", "password"],
+          "description": "Verification method used to create the account."
+        },
+        "verified": {
+          "type": "boolean",
+          "description": "Indicates the contact channel was verified."
+        },
+        "dateOfBirth": {
+          "type": "string",
+          "maxLength": 20,
+          "description": "Optional ISO date of birth."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last-updated timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "email",
+        "phone",
+        "authMethod",
+        "verified",
+        "dateOfBirth",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserPublicProfile"
+      },
+      "description": "Public profile records keyed by Firebase Auth UID."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": {
+        "$ref": "#/entities/UserPrivateAccount"
+      },
+      "description": "Owner-only private account details (email, phone, verification status) stored at docId 'info'."
+    }
+  }
+}

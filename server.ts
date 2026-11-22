@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import dns from 'node:dns/promises';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -7,12 +8,24 @@ import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
 import express from 'express';
 import type {NextFunction, Request, Response} from 'express';
+import nodemailer from 'nodemailer';
 import {WebSocket, WebSocketServer} from 'ws';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+let FIREBASE_WEB_API_KEY = '';
+try {
+  const fbCfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
+  if (fs.existsSync(fbCfgPath)) {
+    const parsed = JSON.parse(fs.readFileSync(fbCfgPath, 'utf8')) as {apiKey?: string};
+    FIREBASE_WEB_API_KEY = String(parsed.apiKey || '').trim();
+  }
+} catch {
+  // Ignore if Firebase config file is not present
+}
 
 const PORT = Number(process.env.PORT) || 3000;
 const IS_PROD = process.env.NODE_ENV === 'production';
@@ -285,6 +298,18 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS otp_challenges (
+    id TEXT PRIMARY KEY,
+    channel TEXT NOT NULL,
+    destination TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    verified INTEGER NOT NULL DEFAULT 0,
+    verification_token TEXT,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `);
 
 // Safe idempotent column migrations for existing databases
@@ -295,6 +320,8 @@ function ensureColumn(table: string, column: string, definition: string) {
   }
 }
 ensureColumn('users', 'date_of_birth', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('users', 'firebase_uid', 'TEXT');
+ensureColumn('users', 'contact_verified', 'INTEGER NOT NULL DEFAULT 1');
 ensureColumn('sessions', 'device_name', "TEXT NOT NULL DEFAULT 'Web Browser'");
 ensureColumn('sessions', 'ip_address', "TEXT NOT NULL DEFAULT 'Local session'");
 ensureColumn('posts', 'video_url', 'TEXT');
@@ -317,18 +344,276 @@ function verifyPassword(password: string, storedHash: string): boolean {
   return crypto.timingSafeEqual(derived, keyBuf);
 }
 
+const BLOCKED_EMAIL_DOMAINS = new Set([
+  'example.com',
+  'example.org',
+  'example.net',
+  'test.com',
+  'fake.com',
+  'invalid.com',
+  'localhost',
+  'asdf.com',
+  'abc.com',
+  'xyz.com',
+  'mailinator.com',
+  'tempmail.com',
+  'temp-mail.org',
+  '10minutemail.com',
+  'guerrillamail.com',
+  'guerrillamail.net',
+  'yopmail.com',
+  'yopmail.fr',
+  'sharklasers.com',
+  'trashmail.com',
+  'maildrop.cc',
+  'dispostable.com',
+  'getnada.com',
+  'mohmal.com',
+  'throwawaymail.com',
+  'fakeinbox.com',
+  'mintemail.com',
+  'mytemp.email',
+  'burnermail.io',
+]);
+
 function normalizeEmail(input: string): string | null {
   const trimmed = input.trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) return null;
+  if (!trimmed || trimmed.length > 120) return null;
+  if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(trimmed)) return null;
+  const [local] = trimmed.split('@');
+  if (!local || local.length < 2 || local.startsWith('.') || local.endsWith('.') || local.includes('..')) {
+    return null;
+  }
   return trimmed;
+}
+
+async function validateRealEmailServer(
+  input: string,
+): Promise<{valid: true; email: string} | {valid: false; error: string}> {
+  const email = normalizeEmail(input);
+  if (!email) {
+    return {valid: false, error: 'Please enter a valid Gmail or email address.'};
+  }
+  const domain = email.split('@')[1];
+  if (BLOCKED_EMAIL_DOMAINS.has(domain)) {
+    return {
+      valid: false,
+      error: 'Temporary or fake email domains are not allowed. Use a real Gmail or email address.',
+    };
+  }
+  try {
+    const mx = await dns.resolveMx(domain);
+    if (!mx || mx.length === 0) {
+      return {
+        valid: false,
+        error: 'This email domain cannot receive mail. Please enter a real Gmail or email address.',
+      };
+    }
+  } catch {
+    return {
+      valid: false,
+      error: 'This email domain does not exist or cannot receive mail. Please enter a real Gmail or email address.',
+    };
+  }
+  return {valid: true, email};
 }
 
 function normalizePhone(input: string): string | null {
   const trimmed = input.trim();
-  const digits = trimmed.replace(/[^\d+]/g, '');
-  const pureDigits = digits.replace(/\+/g, '');
-  if (pureDigits.length < 6 || pureDigits.length > 16) return null;
-  return `+${pureDigits}`;
+  const digits = trimmed.replace(/[^\d]/g, '');
+  if (!digits) return null;
+
+  let fullDigits = digits;
+  if (trimmed.startsWith('+')) {
+    if (fullDigits.startsWith('88001') && fullDigits.length === 14) {
+      fullDigits = '880' + fullDigits.slice(4);
+    }
+  } else if (fullDigits.startsWith('00')) {
+    fullDigits = fullDigits.slice(2);
+  } else if (/^01[3-9]\d{8}$/.test(fullDigits)) {
+    fullDigits = '880' + fullDigits.slice(1);
+  }
+
+  if (fullDigits.length < 8 || fullDigits.length > 15) return null;
+  return `+${fullDigits}`;
+}
+
+function validateRealPhoneServer(
+  input: string,
+): {valid: true; phone: string} | {valid: false; error: string} {
+  const phone = normalizePhone(input);
+  if (!phone) {
+    return {
+      valid: false,
+      error: 'Please enter a valid real phone number with country code (e.g., +8801618859938).',
+    };
+  }
+  const digits = phone.slice(1);
+  if (/^(\d)\1+$/.test(digits)) {
+    return {valid: false, error: 'Fake or repeated phone numbers are not allowed.'};
+  }
+  const seq = '01234567890123456789';
+  const rev = '98765432109876543210';
+  const tail = digits.slice(-8);
+  if (tail.length >= 8 && (seq.includes(tail) || rev.includes(tail))) {
+    return {valid: false, error: 'Fake sequential phone numbers are not allowed.'};
+  }
+  if (digits.startsWith('880') && !/^8801[3-9]\d{8}$/.test(digits)) {
+    return {
+      valid: false,
+      error: 'Enter a valid 11-digit Bangladesh mobile number (e.g., 01618859938 or +8801618859938).',
+    };
+  }
+  return {valid: true, phone};
+}
+
+function buildPhoneCandidates(input: string): string[] {
+  const digits = input.trim().replace(/[^\d]/g, '');
+  if (digits.length < 6 || digits.length > 16) return [];
+  const set = new Set<string>();
+  const canonical = normalizePhone(input);
+  if (canonical) set.add(canonical);
+  set.add(`+${digits}`);
+  if (/^01[3-9]\d{8}$/.test(digits)) {
+    set.add(`+880${digits.slice(1)}`);
+  }
+  if (/^8801[3-9]\d{8}$/.test(digits)) {
+    set.add(`+0${digits.slice(3)}`);
+    set.add(`+${digits.slice(3)}`);
+  }
+  if (/^1[3-9]\d{8}$/.test(digits)) {
+    set.add(`+880${digits}`);
+    set.add(`+0${digits}`);
+  }
+  return Array.from(set);
+}
+
+function findUserByPhone(rawPhone: string): UserRow | undefined {
+  const candidates = buildPhoneCandidates(rawPhone);
+  if (candidates.length === 0) return undefined;
+  const placeholders = candidates.map(() => '?').join(',');
+  return db
+    .prepare(`SELECT * FROM users WHERE phone IN (${placeholders}) LIMIT 1`)
+    .get(...candidates) as UserRow | undefined;
+}
+
+function findUserByIdentifier(raw: string): UserRow | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.includes('@')) {
+    const email = normalizeEmail(trimmed);
+    if (!email) return undefined;
+    return db
+      .prepare('SELECT * FROM users WHERE lower(email) = ? LIMIT 1')
+      .get(email) as UserRow | undefined;
+  }
+  return findUserByPhone(trimmed);
+}
+
+interface VerifiedFirebaseIdentity {
+  uid: string;
+  email: string | null;
+  emailVerified: boolean;
+  phoneNumber: string | null;
+  displayName: string;
+  photoUrl: string;
+}
+
+async function verifyFirebaseIdToken(idToken: string): Promise<VerifiedFirebaseIdentity | null> {
+  if (!idToken || !FIREBASE_WEB_API_KEY) return null;
+  try {
+    const resp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_WEB_API_KEY)}`,
+      {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({idToken}),
+      },
+    );
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as {
+      users?: Array<{
+        localId?: string;
+        email?: string;
+        emailVerified?: boolean;
+        phoneNumber?: string;
+        displayName?: string;
+        photoUrl?: string;
+      }>;
+    };
+    const u = data.users?.[0];
+    if (!u || !u.localId) return null;
+    return {
+      uid: u.localId,
+      email: u.email ? u.email.trim().toLowerCase() : null,
+      emailVerified: Boolean(u.emailVerified),
+      phoneNumber: u.phoneNumber ? normalizePhone(u.phoneNumber) : null,
+      displayName: String(u.displayName || '').trim(),
+      photoUrl: String(u.photoUrl || '').trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function deliverEmailOtp(toEmail: string, code: string): Promise<boolean> {
+  const smtpUser = (process.env.SMTP_USER || '').trim();
+  const smtpPass = (process.env.SMTP_PASS || '').trim();
+  if (!smtpUser || !smtpPass) return false;
+
+  const smtpHost = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
+  const smtpPort = Number(process.env.SMTP_PORT) || 465;
+  const smtpFrom = (process.env.SMTP_FROM || `Verve Verification <${smtpUser}>`).trim();
+
+  const transporter = nodemailer.createTransport({
+    host: smtpHost,
+    port: smtpPort,
+    secure: smtpPort === 465,
+    auth: {
+      user: smtpUser,
+      pass: smtpPass,
+    },
+  });
+
+  await transporter.sendMail({
+    from: smtpFrom,
+    to: toEmail,
+    subject: `${code} is your Verve verification code`,
+    text: `Your Verve signup verification code is: ${code}\n\nThis code expires in 10 minutes. If you did not request this code, you can safely ignore this email.`,
+    html: `<div style="font-family:system-ui,-apple-system,sans-serif;max-width:460px;margin:0 auto;padding:24px;border:1px solid #e5e8ee;border-radius:16px">
+      <h2 style="margin:0 0 8px;color:#1877F2;font-size:22px">Verve</h2>
+      <p style="margin:0 0 16px;color:#334155;font-size:14px">Enter this 6-digit code to verify your email address and finish creating your account:</p>
+      <div style="font-size:32px;font-weight:700;letter-spacing:8px;color:#0f172a;background:#f4f6f9;padding:16px;text-align:center;border-radius:12px">${code}</div>
+      <p style="margin:16px 0 0;color:#64748b;font-size:12px">This code expires in 10 minutes. Do not share it with anyone.</p>
+    </div>`,
+  });
+  return true;
+}
+
+async function deliverTwilioSmsOtp(toPhone: string, code: string): Promise<boolean> {
+  const sid = (process.env.TWILIO_ACCOUNT_SID || '').trim();
+  const authToken = (process.env.TWILIO_AUTH_TOKEN || '').trim();
+  const from = (process.env.TWILIO_FROM_NUMBER || '').trim();
+  if (!sid || !authToken || !from) return false;
+
+  const body = new URLSearchParams({
+    To: toPhone,
+    From: from,
+    Body: `Your Verve verification code is ${code}. It expires in 10 minutes.`,
+  });
+  const resp = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Messages.json`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${sid}:${authToken}`).toString('base64')}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: body.toString(),
+  });
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => '');
+    throw new Error(errText || 'Twilio SMS delivery failed.');
+  }
+  return true;
 }
 
 const VALID_REACTIONS = new Set(['like', 'love', 'care', 'haha', 'wow', 'sad', 'angry']);
@@ -450,373 +735,30 @@ function createSession(userId: number, req?: Request): string {
   return token;
 }
 
-// Seed initial community accounts & posts once if database is empty
-function seedDatabase() {
-  const countRow = db.prepare('SELECT COUNT(*) as count FROM users').get() as {count: number};
-  if (countRow.count > 0) return;
+// Remove legacy pre-seeded demo accounts & auto-posts while preserving all real user accounts
+function cleanupLegacySeededDemoData() {
+  const demoEmails = [
+    'maya@verve.social',
+    'devon@verve.social',
+    'priya@verve.social',
+    'lucas@verve.social',
+  ];
+  const placeholders = demoEmails.map(() => '?').join(',');
+  const demoUsers = db
+    .prepare(`SELECT id FROM users WHERE email IN (${placeholders})`)
+    .all(...demoEmails) as Array<{id: number}>;
 
-  const demoPasswordHash = hashPassword('Password123!');
-
-  const insertUser = db.prepare(`
-    INSERT INTO users (name, email, phone, password_hash, bio, location, work, avatar_url, cover_url, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const mayaId = Number(
-    insertUser.run(
-      'Maya Lin',
-      'maya@verve.social',
-      '+15550104200',
-      demoPasswordHash,
-      'Product designer sketching interfaces, shooting 35mm street frames, and testing coastal pour-overs.',
-      'San Francisco, CA',
-      'Lead Product Designer at Northstar',
-      ASSETS.avatarMaya,
-      ASSETS.coverCoast,
-      '2026-09-14T09:15:00.000Z',
-    ).lastInsertRowid,
-  );
-
-  const devonId = Number(
-    insertUser.run(
-      'Devon Brooks',
-      'devon@verve.social',
-      '+15550104201',
-      demoPasswordHash,
-      'Distributed systems architect by day, vinyl collector and neighborhood runner after sunset.',
-      'Seattle, WA',
-      'Staff Engineer at Cascade Cloud',
-      ASSETS.avatarDevon,
-      ASSETS.coverAlpine,
-      '2026-09-18T11:30:00.000Z',
-    ).lastInsertRowid,
-  );
-
-  const priyaId = Number(
-    insertUser.run(
-      'Priya Nair',
-      'priya@verve.social',
-      '+15550104202',
-      demoPasswordHash,
-      'Documentary photographer capturing twilight architecture, quiet morning rituals, and urban gardens.',
-      'Brooklyn, NY',
-      'Editorial Photographer at Fieldwork',
-      ASSETS.avatarPriya,
-      ASSETS.coverCoast,
-      '2026-10-02T14:20:00.000Z',
-    ).lastInsertRowid,
-  );
-
-  const lucasId = Number(
-    insertUser.run(
-      'Lucas Meyer',
-      'lucas@verve.social',
-      '+15550104203',
-      demoPasswordHash,
-      'Urban mobility planner & weekend gravel cyclist. Always mapping better pedestrian corridors.',
-      'Portland, OR',
-      'Senior Planner at CivicLab',
-      ASSETS.avatarLucas,
-      ASSETS.coverAlpine,
-      '2026-10-11T16:45:00.000Z',
-    ).lastInsertRowid,
-  );
-
-  // Friendships & Follows
-  const insertFriend = db.prepare(
-    'INSERT INTO friendships (requester_id, addressee_id, status) VALUES (?, ?, ?)',
-  );
-  insertFriend.run(mayaId, devonId, 'accepted');
-  insertFriend.run(mayaId, priyaId, 'accepted');
-  insertFriend.run(lucasId, mayaId, 'pending'); // Pending incoming request for Maya
-  insertFriend.run(devonId, priyaId, 'accepted');
-
-  const insertFollow = db.prepare(
-    'INSERT OR IGNORE INTO follows (follower_id, following_id) VALUES (?, ?)',
-  );
-  insertFollow.run(mayaId, devonId);
-  insertFollow.run(mayaId, priyaId);
-  insertFollow.run(devonId, mayaId);
-  insertFollow.run(priyaId, mayaId);
-  insertFollow.run(lucasId, mayaId);
-
-  // Posts
-  const insertPost = db.prepare(
-    'INSERT INTO posts (user_id, content, image_url, created_at) VALUES (?, ?, ?, ?)',
-  );
-  const p1 = Number(
-    insertPost.run(
-      priyaId,
-      'Slow Sunday morning in Oslo before the rain rolled in. Found a sunlit corner table, a washed Ethiopian pour-over, and finally finished the first roll of Portra 400.',
-      ASSETS.postCoffee,
-      new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-    ).lastInsertRowid,
-  );
-
-  const p2 = Number(
-    insertPost.run(
-      lucasId,
-      'Blue hour along the riverfront pedestrian bridge. Thoughtful lighting and car-free walkways completely transform how a city feels after 6 PM.',
-      ASSETS.postBridge,
-      new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
-    ).lastInsertRowid,
-  );
-
-  const p3 = Number(
-    insertPost.run(
-      devonId,
-      'Shipped our real-time WebSocket presence layer this afternoon. Latency stayed flat under 18ms even with reconnect bursts. Anyone else working on real-time sync this week?',
-      null,
-      new Date(Date.now() - 11 * 60 * 60 * 1000).toISOString(),
-    ).lastInsertRowid,
-  );
-
-  const p4 = Number(
-    insertPost.run(
-      mayaId,
-      'Refreshing our design tokens for dark mode today—turns out subtle 1px slate hairlines and slightly wider letter spacing make late-night reading dramatically easier on the eyes.',
-      null,
-      new Date(Date.now() - 20 * 60 * 60 * 1000).toISOString(),
-    ).lastInsertRowid,
-  );
-
-  // Likes
-  const insertLike = db.prepare(
-    'INSERT OR IGNORE INTO post_likes (post_id, user_id) VALUES (?, ?)',
-  );
-  insertLike.run(p1, mayaId);
-  insertLike.run(p1, devonId);
-  insertLike.run(p1, lucasId);
-  insertLike.run(p2, mayaId);
-  insertLike.run(p2, priyaId);
-  insertLike.run(p3, mayaId);
-  insertLike.run(p4, devonId);
-  insertLike.run(p4, priyaId);
-
-  // Comments
-  const insertComment = db.prepare(
-    'INSERT INTO comments (post_id, user_id, content, created_at) VALUES (?, ?, ?, ?)',
-  );
-  insertComment.run(
-    p1,
-    mayaId,
-    'The light across that oak table is unreal. Cannot wait to see the developed scans!',
-    new Date(Date.now() - 95 * 60 * 1000).toISOString(),
-  );
-  insertComment.run(
-    p1,
-    devonId,
-    'Ceramic mug + analog camera is an unbeatable weekend combo.',
-    new Date(Date.now() - 62 * 60 * 1000).toISOString(),
-  );
-  insertComment.run(
-    p2,
-    priyaId,
-    'Those warm lamp reflections on the river came out so crisp.',
-    new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
-  );
-  insertComment.run(
-    p4,
-    devonId,
-    'Agreed — proper surface contrast beats heavy drop shadows every time.',
-    new Date(Date.now() - 18 * 60 * 60 * 1000).toISOString(),
-  );
-
-  // Messages
-  const insertMsg = db.prepare(
-    'INSERT INTO messages (sender_id, receiver_id, content, read, created_at) VALUES (?, ?, ?, ?, ?)',
-  );
-  insertMsg.run(
-    devonId,
-    mayaId,
-    'Hey Maya! Are you still free to review the profile editor layout tomorrow morning?',
-    1,
-    new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
-  );
-  insertMsg.run(
-    mayaId,
-    devonId,
-    'Yes! 10 AM works great. I just uploaded a new coastal cover banner to test the crop ratios.',
-    1,
-    new Date(Date.now() - 3.5 * 60 * 60 * 1000).toISOString(),
-  );
-  insertMsg.run(
-    priyaId,
-    mayaId,
-    'Just shared a few photos from the coffee shop this morning — let me know what you think!',
-    0,
-    new Date(Date.now() - 45 * 60 * 1000).toISOString(),
-  );
-
-  // Notifications
-  const insertNotif = db.prepare(
-    'INSERT INTO notifications (user_id, actor_id, type, entity_id, message, read, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-  );
-  insertNotif.run(
-    mayaId,
-    lucasId,
-    'friend_request',
-    lucasId,
-    'Lucas Meyer sent you a friend request.',
-    0,
-    new Date(Date.now() - 50 * 60 * 1000).toISOString(),
-  );
-  insertNotif.run(
-    mayaId,
-    devonId,
-    'comment',
-    p4,
-    'Devon Brooks commented on your post.',
-    0,
-    new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-  );
-  insertNotif.run(
-    mayaId,
-    priyaId,
-    'like',
-    p4,
-    'Priya Nair liked your post.',
-    1,
-    new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
-  );
-}
-
-seedDatabase();
-
-function seedCommunityHubs() {
-  const firstUser = db.prepare('SELECT id FROM users ORDER BY id ASC LIMIT 1').get() as
-    | {id: number}
-    | undefined;
-  const hostId = firstUser?.id ?? null;
-
-  const groupCount = (db.prepare('SELECT COUNT(*) as count FROM groups_table').get() as {count: number}).count;
-  if (groupCount === 0) {
-    const ins = db.prepare(
-      'INSERT INTO groups_table (name, category, description, cover_url, created_by) VALUES (?, ?, ?, ?, ?)',
-    );
-    const g1 = Number(
-      ins.run(
-        '35mm Street & Architecture',
-        'Photography',
-        'Analog photography notes, film scans, and city light discussions.',
-        ASSETS.postBridge,
-        hostId,
-      ).lastInsertRowid,
-    );
-    const g2 = Number(
-      ins.run(
-        'Specialty Coffee & Morning Rituals',
-        'Lifestyle',
-        'Pour-over recipes, local roasters, and favorite quiet cafe corners.',
-        ASSETS.postCoffee,
-        hostId,
-      ).lastInsertRowid,
-    );
-    ins.run(
-      'Design Systems & Dark UI Craft',
-      'Design & Tech',
-      'Sharing typography pairings, contrast tokens, and component reviews.',
-      ASSETS.coverAlpine,
-      hostId,
-    );
-    if (hostId) {
-      db.prepare('INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)').run(g1, hostId);
-      db.prepare('INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)').run(g2, hostId);
-    }
-  }
-
-  const marketCount = (db.prepare('SELECT COUNT(*) as count FROM marketplace_items').get() as {count: number}).count;
-  if (marketCount === 0 && hostId) {
-    const ins = db.prepare(
-      'INSERT INTO marketplace_items (seller_id, title, price, category, location, description, image_url) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    );
-    ins.run(
-      hostId,
-      'Vintage 35mm Rangefinder Camera',
-      '$420',
-      'Electronics',
-      'San Francisco, CA',
-      'Clean glass, accurate shutter speeds, includes leather neck strap and fresh battery.',
-      ASSETS.postCoffee,
-    );
-    ins.run(
-      hostId,
-      'Architectural Coastal Print (24×36)',
-      '$95',
-      'Home & Decor',
-      'Brooklyn, NY',
-      'Museum-grade archival matte print ready for framing.',
-      ASSETS.coverCoast,
-    );
-    ins.run(
-      hostId,
-      'Minimalist Alpine Canvas Wall Art',
-      '$130',
-      'Home & Decor',
-      'Seattle, WA',
-      'Deep twilight mountain reflection printed on textured cotton canvas.',
-      ASSETS.coverAlpine,
-    );
-  }
-
-  const eventCount = (db.prepare('SELECT COUNT(*) as count FROM events_table').get() as {count: number}).count;
-  if (eventCount === 0) {
-    const ins = db.prepare(
-      'INSERT INTO events_table (title, event_date, location, description, host_id) VALUES (?, ?, ?, ?, ?)',
-    );
-    ins.run(
-      'Blue Hour Riverfront Photo Walk',
-      'Sat, Nov 28 · 5:30 PM',
-      'Waterfront Footbridge Plaza',
-      'Casual evening walk shooting twilight city reflections. Bring any camera or phone.',
-      hostId,
-    );
-    ins.run(
-      'Sunday Pour-Over Tasting & Sketch Session',
-      'Sun, Dec 6 · 10:00 AM',
-      'Oak & Bean Roastery',
-      'Sample single-origin coffees while sketching UI layouts or notebooks together.',
-      hostId,
-    );
-    ins.run(
-      'Modern Web Architecture Meetup',
-      'Thu, Dec 10 · 6:30 PM',
-      'Downtown Civic Loft',
-      'Lightning talks on real-time WebSockets, resilient CSS, and local-first tools.',
-      hostId,
-    );
-  }
-
-  const pageCount = (db.prepare('SELECT COUNT(*) as count FROM pages_table').get() as {count: number}).count;
-  if (pageCount === 0) {
-    const ins = db.prepare(
-      'INSERT INTO pages_table (name, category, bio, avatar_url, created_by) VALUES (?, ?, ?, ?, ?)',
-    );
-    ins.run(
-      'Northstar Design Journal',
-      'Design Studio',
-      'Weekly case studies on clean product interfaces and typographic hierarchy.',
-      ASSETS.avatarMaya,
-      hostId,
-    );
-    ins.run(
-      'Fieldwork Documentary',
-      'Media & Photography',
-      'Curated photo essays exploring quiet cities, craftsmanship, and light.',
-      ASSETS.avatarPriya,
-      hostId,
-    );
-    ins.run(
-      'Civic Mobility Lab',
-      'Urban Planning',
-      'Research and community updates on walkable neighborhoods and bike infrastructure.',
-      ASSETS.avatarLucas,
-      hostId,
-    );
+  if (demoUsers.length > 0) {
+    const ids = demoUsers.map((u) => u.id);
+    const idPlaceholders = ids.map(() => '?').join(',');
+    db.prepare(`DELETE FROM groups_table WHERE created_by IN (${idPlaceholders})`).run(...ids);
+    db.prepare(`DELETE FROM events_table WHERE host_id IN (${idPlaceholders})`).run(...ids);
+    db.prepare(`DELETE FROM pages_table WHERE created_by IN (${idPlaceholders})`).run(...ids);
+    db.prepare(`DELETE FROM users WHERE id IN (${idPlaceholders})`).run(...ids);
   }
 }
 
-seedCommunityHubs();
+cleanupLegacySeededDemoData();
 
 // Express setup
 const app = express();
@@ -1121,16 +1063,249 @@ function getProfileSummary(targetUser: UserRow, viewerId: number) {
 }
 
 // =======================
-// AUTH ROUTES
+// AUTH & REAL VERIFICATION ROUTES
 // =======================
 
-app.post('/api/auth/register', (req: Request, res: Response) => {
-  const {name, identifier, email: rawEmail, phone: rawPhone, password} = req.body as {
+app.get('/api/auth/capabilities', (_req: Request, res: Response) => {
+  const emailOtpReady = Boolean((process.env.SMTP_USER || '').trim() && (process.env.SMTP_PASS || '').trim());
+  const smsTwilioReady = Boolean(
+    (process.env.TWILIO_ACCOUNT_SID || '').trim() &&
+      (process.env.TWILIO_AUTH_TOKEN || '').trim() &&
+      (process.env.TWILIO_FROM_NUMBER || '').trim(),
+  );
+  res.json({
+    emailOtpReady,
+    smsTwilioReady,
+    googleReady: Boolean(FIREBASE_WEB_API_KEY),
+  });
+});
+
+app.post('/api/auth/check-contact', async (req: Request, res: Response) => {
+  const {channel, contact} = req.body as {channel?: 'email' | 'phone'; contact?: string};
+  if (channel === 'email') {
+    const check = await validateRealEmailServer(contact || '');
+    if (!check.valid) {
+      res.status(400).json({error: check.error});
+      return;
+    }
+    const existing = db
+      .prepare('SELECT id FROM users WHERE lower(email) = ?')
+      .get(check.email);
+    if (existing) {
+      res.status(409).json({error: 'An account with this email already exists. Please sign in.'});
+      return;
+    }
+    res.json({valid: true, normalized: check.email});
+    return;
+  }
+
+  const phoneCheck = validateRealPhoneServer(contact || '');
+  if (!phoneCheck.valid) {
+    res.status(400).json({error: phoneCheck.error});
+    return;
+  }
+  const existingPhone = findUserByPhone(phoneCheck.phone);
+  if (existingPhone) {
+    res.status(409).json({error: 'An account with this phone number already exists. Please sign in.'});
+    return;
+  }
+  res.json({valid: true, normalized: phoneCheck.phone});
+});
+
+app.post('/api/auth/otp/send', async (req: Request, res: Response) => {
+  const {channel, contact} = req.body as {channel?: 'email' | 'phone'; contact?: string};
+  if (channel !== 'email' && channel !== 'phone') {
+    res.status(400).json({error: 'Choose email or phone verification.'});
+    return;
+  }
+
+  let destination = '';
+  if (channel === 'email') {
+    const check = await validateRealEmailServer(contact || '');
+    if (!check.valid) {
+      res.status(400).json({error: check.error});
+      return;
+    }
+    const existing = db.prepare('SELECT id FROM users WHERE lower(email) = ?').get(check.email);
+    if (existing) {
+      res.status(409).json({error: 'An account with this email already exists. Please sign in.'});
+      return;
+    }
+    destination = check.email;
+  } else {
+    const check = validateRealPhoneServer(contact || '');
+    if (!check.valid) {
+      res.status(400).json({error: check.error});
+      return;
+    }
+    const existing = findUserByPhone(check.phone);
+    if (existing) {
+      res.status(409).json({error: 'An account with this phone number already exists. Please sign in.'});
+      return;
+    }
+    destination = check.phone;
+  }
+
+  // Cooldown: 25 seconds per destination
+  const recent = db
+    .prepare(
+      `SELECT created_at FROM otp_challenges
+       WHERE destination = ? AND datetime(created_at, '+25 seconds') > datetime('now')
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(destination) as {created_at: string} | undefined;
+  if (recent) {
+    res.status(429).json({error: 'Please wait a few seconds before requesting another code.'});
+    return;
+  }
+
+  const code = String(crypto.randomInt(100000, 1000000));
+  const challengeId = crypto.randomBytes(16).toString('hex');
+  const codeHash = hashPassword(code);
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+  db.prepare(
+    `INSERT INTO otp_challenges (id, channel, destination, code_hash, expires_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(challengeId, channel, destination, codeHash, expiresAt);
+
+  try {
+    if (channel === 'email') {
+      const delivered = await deliverEmailOtp(destination, code);
+      if (!delivered) {
+        db.prepare('DELETE FROM otp_challenges WHERE id = ?').run(challengeId);
+        res.status(503).json({
+          code: 'SMTP_NOT_CONFIGURED',
+          error:
+            'Real email OTP delivery needs SMTP_USER and SMTP_PASS (Gmail App Password) configured in Secrets. Or click "Verify Real Gmail with Google" below to verify instantly.',
+        });
+        return;
+      }
+      res.json({
+        sent: true,
+        challengeId,
+        channel: 'email',
+        destination,
+        maskedDestination: maskDestination(destination, null),
+        expiresInSeconds: 600,
+        message: `A 6-digit verification code was sent to ${maskDestination(destination, null)}.`,
+      });
+      return;
+    }
+
+    const smsSent = await deliverTwilioSmsOtp(destination, code);
+    if (!smsSent) {
+      db.prepare('DELETE FROM otp_challenges WHERE id = ?').run(challengeId);
+      res.status(503).json({
+        code: 'SMS_NOT_CONFIGURED',
+        error:
+          'Real SMS OTP requires enabling Phone Sign-In in Firebase Console or configuring Twilio Secrets.',
+      });
+      return;
+    }
+
+    res.json({
+      sent: true,
+      challengeId,
+      channel: 'phone',
+      destination,
+      maskedDestination: maskDestination(null, destination),
+      expiresInSeconds: 600,
+      message: `A 6-digit SMS verification code was sent to ${maskDestination(null, destination)}.`,
+    });
+  } catch (err) {
+    db.prepare('DELETE FROM otp_challenges WHERE id = ?').run(challengeId);
+    console.error('OTP delivery failed:', err);
+    res.status(502).json({
+      error:
+        channel === 'email'
+          ? 'Could not send email verification code. Check your SMTP credentials or use Google verification.'
+          : 'Could not send SMS verification code. Check your phone number and SMS provider settings.',
+    });
+  }
+});
+
+app.post('/api/auth/otp/verify', (req: Request, res: Response) => {
+  const {challengeId, code} = req.body as {challengeId?: string; code?: string};
+  const cleanCode = String(code || '').replace(/\s+/g, '');
+  if (!challengeId || !/^\d{6}$/.test(cleanCode)) {
+    res.status(400).json({error: 'Enter the 6-digit verification code.'});
+    return;
+  }
+
+  const challenge = db
+    .prepare('SELECT * FROM otp_challenges WHERE id = ?')
+    .get(challengeId) as
+    | {
+        id: string;
+        channel: string;
+        destination: string;
+        code_hash: string;
+        attempts: number;
+        verified: number;
+        verification_token: string | null;
+        expires_at: string;
+      }
+    | undefined;
+
+  if (!challenge) {
+    res.status(400).json({error: 'Verification session not found. Please tap Send Code again.'});
+    return;
+  }
+
+  if (new Date(challenge.expires_at).getTime() < Date.now()) {
+    res.status(400).json({error: 'Verification code has expired. Please request a new code.'});
+    return;
+  }
+
+  if (challenge.attempts >= 5) {
+    res.status(429).json({error: 'Too many wrong attempts. Please tap Send Code to get a new code.'});
+    return;
+  }
+
+  if (!verifyPassword(cleanCode, challenge.code_hash)) {
+    db.prepare('UPDATE otp_challenges SET attempts = attempts + 1 WHERE id = ?').run(challenge.id);
+    const left = Math.max(0, 4 - challenge.attempts);
+    res.status(400).json({
+      error:
+        left > 0
+          ? `Incorrect verification code. ${left} ${left === 1 ? 'attempt' : 'attempts'} remaining.`
+          : 'Too many incorrect attempts. Please request a new code.',
+    });
+    return;
+  }
+
+  const verificationToken = crypto.randomBytes(24).toString('hex');
+  const tokenExpiry = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+  db.prepare(
+    'UPDATE otp_challenges SET verified = 1, verification_token = ?, expires_at = ? WHERE id = ?',
+  ).run(verificationToken, tokenExpiry, challenge.id);
+
+  res.json({
+    verified: true,
+    verificationToken,
+    destination: challenge.destination,
+    channel: challenge.channel,
+  });
+});
+
+app.post('/api/auth/register', async (req: Request, res: Response) => {
+  const {
+    name,
+    identifier,
+    email: rawEmail,
+    phone: rawPhone,
+    password,
+    verificationToken,
+    firebaseIdToken,
+  } = req.body as {
     name?: string;
     identifier?: string;
     email?: string;
     phone?: string;
     password?: string;
+    verificationToken?: string;
+    firebaseIdToken?: string;
   };
 
   const trimmedName = (name || '').trim();
@@ -1146,47 +1321,108 @@ app.post('/api/auth/register', (req: Request, res: Response) => {
 
   let email: string | null = null;
   let phone: string | null = null;
+  let firebaseUid: string | null = null;
+  let avatarUrl = ASSETS.avatarMaya;
 
   if (rawEmail && rawEmail.trim()) {
-    email = normalizeEmail(rawEmail);
-    if (!email) {
-      res.status(400).json({error: 'Please enter a valid email address (e.g., name@gmail.com).'});
+    const check = await validateRealEmailServer(rawEmail);
+    if (!check.valid) {
+      res.status(400).json({error: check.error});
       return;
     }
+    email = check.email;
   }
 
   if (rawPhone && rawPhone.trim()) {
-    phone = normalizePhone(rawPhone);
-    if (!phone) {
-      res.status(400).json({error: 'Please enter a valid phone number (7–15 digits).'});
+    const check = validateRealPhoneServer(rawPhone);
+    if (!check.valid) {
+      res.status(400).json({error: check.error});
       return;
     }
+    phone = check.phone;
   }
 
   if (!email && !phone && identifier && identifier.trim()) {
     const idVal = identifier.trim();
     if (idVal.includes('@')) {
-      email = normalizeEmail(idVal);
-      if (!email) {
-        res.status(400).json({error: 'Please enter a valid Gmail or email address.'});
+      const check = await validateRealEmailServer(idVal);
+      if (!check.valid) {
+        res.status(400).json({error: check.error});
         return;
       }
+      email = check.email;
     } else {
-      phone = normalizePhone(idVal);
-      if (!phone) {
-        res.status(400).json({error: 'Please enter a valid email address or phone number.'});
+      const check = validateRealPhoneServer(idVal);
+      if (!check.valid) {
+        res.status(400).json({error: check.error});
         return;
       }
+      phone = check.phone;
     }
   }
 
   if (!email && !phone) {
-    res.status(400).json({error: 'Provide an email/Gmail address or a phone number to sign up.'});
+    res.status(400).json({error: 'Provide a real Gmail/email address or a real phone number.'});
+    return;
+  }
+
+  // MANDATORY REAL VERIFICATION GATE: require either verified OTP token OR verified Firebase ID token
+  let verifiedOk = false;
+  let consumedChallengeId: string | null = null;
+
+  if (firebaseIdToken && firebaseIdToken.trim()) {
+    const fb = await verifyFirebaseIdToken(firebaseIdToken.trim());
+    if (!fb) {
+      res.status(401).json({error: 'Firebase verification expired or invalid. Please verify again.'});
+      return;
+    }
+    if (email && fb.email && fb.email === email && fb.emailVerified) {
+      verifiedOk = true;
+      firebaseUid = fb.uid;
+      if (fb.photoUrl) avatarUrl = fb.photoUrl;
+    } else if (phone && fb.phoneNumber) {
+      const targetSet = new Set(buildPhoneCandidates(phone));
+      const fbCandidates = buildPhoneCandidates(fb.phoneNumber);
+      if (fbCandidates.some((c) => targetSet.has(c))) {
+        verifiedOk = true;
+        firebaseUid = fb.uid;
+        phone = fb.phoneNumber;
+      }
+    }
+  }
+
+  if (!verifiedOk && verificationToken && verificationToken.trim()) {
+    const challenge = db
+      .prepare('SELECT * FROM otp_challenges WHERE verification_token = ? AND verified = 1')
+      .get(verificationToken.trim()) as
+      | {id: string; channel: string; destination: string; expires_at: string}
+      | undefined;
+
+    if (challenge && new Date(challenge.expires_at).getTime() >= Date.now()) {
+      if (challenge.channel === 'email' && email && challenge.destination === email) {
+        verifiedOk = true;
+        consumedChallengeId = challenge.id;
+      } else if (challenge.channel === 'phone' && phone) {
+        const targetSet = new Set(buildPhoneCandidates(phone));
+        if (buildPhoneCandidates(challenge.destination).some((c) => targetSet.has(c))) {
+          verifiedOk = true;
+          consumedChallengeId = challenge.id;
+          phone = challenge.destination;
+        }
+      }
+    }
+  }
+
+  if (!verifiedOk) {
+    res.status(403).json({
+      error:
+        'Verification required. Please click "Send Code" and enter the real verification code sent to your Gmail or phone number before creating an account.',
+    });
     return;
   }
 
   if (email) {
-    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+    const existing = db.prepare('SELECT id FROM users WHERE lower(email) = ?').get(email);
     if (existing) {
       res.status(409).json({error: 'An account with this email already exists. Try signing in.'});
       return;
@@ -1194,7 +1430,7 @@ app.post('/api/auth/register', (req: Request, res: Response) => {
   }
 
   if (phone) {
-    const existing = db.prepare('SELECT id FROM users WHERE phone = ?').get(phone);
+    const existing = findUserByPhone(phone);
     if (existing) {
       res.status(409).json({error: 'An account with this phone number already exists. Try signing in.'});
       return;
@@ -1204,8 +1440,8 @@ app.post('/api/auth/register', (req: Request, res: Response) => {
   const passwordHash = hashPassword(password);
   const result = db
     .prepare(
-      `INSERT INTO users (name, email, phone, password_hash, bio, location, work, avatar_url, cover_url)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO users (name, email, phone, password_hash, bio, location, work, avatar_url, cover_url, firebase_uid, contact_verified)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
     )
     .run(
       trimmedName,
@@ -1215,43 +1451,234 @@ app.post('/api/auth/register', (req: Request, res: Response) => {
       'New on Verve — sharing ideas, moments, and updates.',
       '',
       '',
-      ASSETS.avatarMaya,
+      avatarUrl,
       ASSETS.coverCoast,
+      firebaseUid,
     );
+
+  if (consumedChallengeId) {
+    db.prepare('DELETE FROM otp_challenges WHERE id = ?').run(consumedChallengeId);
+  }
 
   const newUserId = Number(result.lastInsertRowid);
   const newUser = db.prepare('SELECT * FROM users WHERE id = ?').get(newUserId) as UserRow;
-
-  // Give new accounts immediate community activity: 2 incoming friend requests & welcome notification
-  const seedMembers = db
-    .prepare('SELECT id, name FROM users WHERE id != ? ORDER BY id ASC LIMIT 2')
-    .all(newUserId) as Array<{id: number; name: string}>;
-
-  for (const member of seedMembers) {
-    db.prepare(
-      'INSERT OR IGNORE INTO friendships (requester_id, addressee_id, status) VALUES (?, ?, ?)',
-    ).run(member.id, newUserId, 'pending');
-    createNotification(
-      newUserId,
-      member.id,
-      'friend_request',
-      member.id,
-      `${member.name} sent you a friend request.`,
-    );
-  }
 
   createNotification(
     newUserId,
     null,
     'welcome',
     null,
-    'Welcome to Verve! Customize your profile bio, avatar, and cover photo anytime.',
+    'Welcome to Verve! Your account is verified and saved permanently.',
   );
 
   const token = createSession(newUserId, req);
   res.status(201).json({
     token,
     user: getProfileSummary(newUser, newUserId),
+  });
+});
+
+// Firebase Auth sign-in / sync (Google verified Gmail or Firebase Phone Auth)
+app.post('/api/auth/firebase-auth', async (req: Request, res: Response) => {
+  const {
+    firebaseIdToken,
+    name,
+    password,
+    bio,
+    location,
+    work,
+    avatar_url,
+    cover_url,
+    date_of_birth,
+  } = req.body as {
+    firebaseIdToken?: string;
+    name?: string;
+    password?: string;
+    bio?: string;
+    location?: string;
+    work?: string;
+    avatar_url?: string;
+    cover_url?: string;
+    date_of_birth?: string;
+  };
+
+  if (!firebaseIdToken) {
+    res.status(400).json({error: 'Firebase authentication token is required.'});
+    return;
+  }
+
+  const fb = await verifyFirebaseIdToken(firebaseIdToken);
+  if (!fb) {
+    res.status(401).json({error: 'Invalid or expired Firebase authentication. Please try again.'});
+    return;
+  }
+
+  const isVerified = (fb.email && fb.emailVerified) || Boolean(fb.phoneNumber);
+  if (!isVerified) {
+    res.status(403).json({error: 'Your Google/Firebase email or phone number must be verified first.'});
+    return;
+  }
+
+  let user: UserRow | undefined = db
+    .prepare('SELECT * FROM users WHERE firebase_uid = ? LIMIT 1')
+    .get(fb.uid) as UserRow | undefined;
+
+  if (!user && fb.email) {
+    user = db
+      .prepare('SELECT * FROM users WHERE lower(email) = ? LIMIT 1')
+      .get(fb.email) as UserRow | undefined;
+  }
+  if (!user && fb.phoneNumber) {
+    user = findUserByPhone(fb.phoneNumber);
+  }
+
+  if (user) {
+    // Link firebase_uid & optional password update if newly provided during verified registration
+    if (password && password.length >= 6) {
+      db.prepare('UPDATE users SET firebase_uid = ?, password_hash = ?, contact_verified = 1 WHERE id = ?').run(
+        fb.uid,
+        hashPassword(password),
+        user.id,
+      );
+    } else {
+      db.prepare('UPDATE users SET firebase_uid = ?, contact_verified = 1 WHERE id = ?').run(
+        fb.uid,
+        user.id,
+      );
+    }
+    user = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id) as UserRow;
+  } else {
+    const finalName = (name || fb.displayName || 'Verve Member').trim().slice(0, 60);
+    const pwHash = hashPassword(
+      password && password.length >= 6 ? password : crypto.randomBytes(24).toString('hex'),
+    );
+    const result = db
+      .prepare(
+        `INSERT INTO users (name, email, phone, password_hash, bio, location, work, avatar_url, cover_url, date_of_birth, firebase_uid, contact_verified)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      )
+      .run(
+        finalName.length >= 2 ? finalName : 'Verve Member',
+        fb.email,
+        fb.phoneNumber,
+        pwHash,
+        (bio || 'New on Verve — sharing ideas, moments, and updates.').slice(0, 320),
+        (location || '').slice(0, 80),
+        (work || '').slice(0, 100),
+        (avatar_url || fb.photoUrl || ASSETS.avatarMaya).slice(0, 2048),
+        (cover_url || ASSETS.coverCoast).slice(0, 2048),
+        (date_of_birth || '').slice(0, 20),
+        fb.uid,
+      );
+    user = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(result.lastInsertRowid)) as UserRow;
+  }
+
+  const token = createSession(user.id, req);
+  res.json({
+    token,
+    user: getProfileSummary(user, user.id),
+  });
+});
+
+// Seamless re-hydration if a server container restarted/redeployed and wiped SQLite,
+// while the user already has a PBKDF2-verified account saved in their permanent browser vault.
+app.post('/api/auth/restore', async (req: Request, res: Response) => {
+  const {
+    name,
+    email: rawEmail,
+    phone: rawPhone,
+    password,
+    bio,
+    location,
+    work,
+    avatar_url,
+    cover_url,
+    date_of_birth,
+    firebaseUid,
+  } = req.body as {
+    name?: string;
+    email?: string | null;
+    phone?: string | null;
+    password?: string;
+    bio?: string;
+    location?: string;
+    work?: string;
+    avatar_url?: string;
+    cover_url?: string;
+    date_of_birth?: string;
+    firebaseUid?: string | null;
+  };
+
+  if (!password || password.length < 6) {
+    res.status(400).json({error: 'Invalid email/phone or password. Please try again.'});
+    return;
+  }
+
+  const email = rawEmail ? normalizeEmail(rawEmail) : null;
+  const phone = rawPhone ? normalizePhone(rawPhone) : null;
+  if (!email && !phone) {
+    res.status(400).json({error: 'Invalid account credentials.'});
+    return;
+  }
+
+  // SECURITY: If the account ALREADY exists in SQLite, NEVER overwrite it — strictly verify password!
+  const existing = email
+    ? (db.prepare('SELECT * FROM users WHERE lower(email) = ? LIMIT 1').get(email) as UserRow | undefined)
+    : phone
+      ? findUserByPhone(phone)
+      : undefined;
+
+  if (existing) {
+    if (!verifyPassword(password, existing.password_hash)) {
+      res.status(401).json({error: 'Invalid email/phone or password. Please try again.'});
+      return;
+    }
+    const token = createSession(existing.id, req);
+    res.json({token, user: getProfileSummary(existing, existing.id)});
+    return;
+  }
+
+  // Account was lost from ephemeral SQLite (e.g., container redeploy) — validate real contact before restoring
+  if (email) {
+    const check = await validateRealEmailServer(email);
+    if (!check.valid) {
+      res.status(400).json({error: check.error});
+      return;
+    }
+  }
+  if (phone) {
+    const check = validateRealPhoneServer(phone);
+    if (!check.valid) {
+      res.status(400).json({error: check.error});
+      return;
+    }
+  }
+
+  const safeName = (name || 'Verve Member').trim().slice(0, 60);
+  const result = db
+    .prepare(
+      `INSERT INTO users (name, email, phone, password_hash, bio, location, work, avatar_url, cover_url, date_of_birth, firebase_uid, contact_verified)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+    )
+    .run(
+      safeName.length >= 2 ? safeName : 'Verve Member',
+      email,
+      phone,
+      hashPassword(password),
+      (bio || '').slice(0, 320),
+      (location || '').slice(0, 80),
+      (work || '').slice(0, 100),
+      (avatar_url || ASSETS.avatarMaya).slice(0, 2048),
+      (cover_url || ASSETS.coverCoast).slice(0, 2048),
+      (date_of_birth || '').slice(0, 20),
+      firebaseUid || null,
+    );
+
+  const restored = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(result.lastInsertRowid)) as UserRow;
+  const token = createSession(restored.id, req);
+  res.json({
+    token,
+    user: getProfileSummary(restored, restored.id),
   });
 });
 
@@ -1262,21 +1689,7 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
     return;
   }
 
-  const raw = identifier.trim();
-  let user: UserRow | undefined;
-
-  if (raw.includes('@')) {
-    const email = normalizeEmail(raw);
-    if (email) {
-      user = db.prepare('SELECT * FROM users WHERE email = ?').get(email) as UserRow | undefined;
-    }
-  } else {
-    const phone = normalizePhone(raw);
-    if (phone) {
-      user = db.prepare('SELECT * FROM users WHERE phone = ?').get(phone) as UserRow | undefined;
-    }
-  }
-
+  const user = findUserByIdentifier(identifier);
   if (!user || !verifyPassword(password, user.password_hash)) {
     res.status(401).json({error: 'Invalid email/phone or password. Please try again.'});
     return;
@@ -1296,6 +1709,7 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
 });
 
 app.post('/api/auth/logout', requireAuth, (req: AuthedRequest, res: Response) => {
+  // ONLY delete the active session token — NEVER delete the user account!
   if (req.token) {
     db.prepare('DELETE FROM sessions WHERE token = ?').run(req.token);
   }
@@ -1313,25 +1727,7 @@ app.post('/api/auth/forgot-password', (req: Request, res: Response) => {
     return;
   }
 
-  const raw = identifier.trim();
-  let user: UserRow | undefined;
-
-  if (raw.includes('@')) {
-    const email = normalizeEmail(raw);
-    if (!email) {
-      res.status(400).json({error: 'Please enter a valid email address.'});
-      return;
-    }
-    user = db.prepare('SELECT * FROM users WHERE email = ?').get(email) as UserRow | undefined;
-  } else {
-    const phone = normalizePhone(raw);
-    if (!phone) {
-      res.status(400).json({error: 'Please enter a valid email address or phone number.'});
-      return;
-    }
-    user = db.prepare('SELECT * FROM users WHERE phone = ?').get(phone) as UserRow | undefined;
-  }
-
+  const user = findUserByIdentifier(identifier);
   if (!user) {
     res.status(404).json({error: 'No account found matching that email address or phone number.'});
     return;
@@ -2300,41 +2696,12 @@ app.post('/api/settings/change-password', requireAuth, (req: AuthedRequest, res:
   res.json({message: 'Password updated successfully.'});
 });
 
-app.get('/api/auth/switchable-accounts', requireAuth, (req: AuthedRequest, res: Response) => {
-  const demoEmails = [
-    'maya@verve.social',
-    'devon@verve.social',
-    'priya@verve.social',
-    'lucas@verve.social',
-  ];
-  const placeholders = demoEmails.map(() => '?').join(',');
-  const rows = db
-    .prepare(`SELECT * FROM users WHERE email IN (${placeholders}) AND id != ? ORDER BY id ASC`)
-    .all(...demoEmails, req.user!.id) as UserRow[];
-
-  res.json({
-    accounts: rows.map((u) => sanitizeUser(u)),
-  });
+app.get('/api/auth/switchable-accounts', requireAuth, (_req: AuthedRequest, res: Response) => {
+  res.json({accounts: []});
 });
 
-app.post('/api/auth/quick-switch', requireAuth, (req: AuthedRequest, res: Response) => {
-  const targetId = Number((req.body as {userId?: number}).userId);
-  const demoEmails = new Set([
-    'maya@verve.social',
-    'devon@verve.social',
-    'priya@verve.social',
-    'lucas@verve.social',
-  ]);
-  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(targetId) as UserRow | undefined;
-  if (!target || !target.email || !demoEmails.has(target.email)) {
-    res.status(403).json({error: 'Use password login to switch to a personal account.'});
-    return;
-  }
-  const token = createSession(target.id, req);
-  res.json({
-    token,
-    user: getProfileSummary(target, target.id),
-  });
+app.post('/api/auth/quick-switch', requireAuth, (_req: AuthedRequest, res: Response) => {
+  res.status(403).json({error: 'Use password login to switch accounts.'});
 });
 
 app.post('/api/posts/:id/save', requireAuth, (req: AuthedRequest, res: Response) => {

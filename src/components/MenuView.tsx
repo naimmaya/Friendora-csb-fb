@@ -1,22 +1,29 @@
-import {useEffect, useMemo, useState} from 'react';
+import {useCallback, useEffect, useMemo, useState} from 'react';
+import type {FormEvent, MouseEvent} from 'react';
 import {
+  AlertCircle,
   ArrowUpDown,
   BarChart3,
   Bookmark,
   CalendarDays,
   Check,
+  CheckCircle2,
   ChevronDown,
   ChevronLeft,
   ChevronUp,
   Clock,
   Copy,
+  Eye,
+  EyeOff,
   Film,
   Flag,
   Gift,
   Globe,
   Heart,
   History,
+  Loader2,
   Lock,
+  LogIn,
   LogOut,
   MessageCircle,
   Moon,
@@ -29,8 +36,22 @@ import {
   UserPlus,
   Users,
   UsersRound,
+  X,
 } from 'lucide-react';
-import {apiRequest, setAuthToken} from '../lib/api';
+import {
+  clearVaultSessionToken,
+  listVaultAccounts,
+  removeVaultAccount,
+  saveAccountToVault,
+  verifyCredentialsInVault,
+  type VaultAccountRecord,
+} from '../lib/accountVault';
+import {apiRequest, fetchMeWithToken, getAuthToken, setAuthToken} from '../lib/api';
+import {
+  loadUserProfileFromFirestore,
+  signInWithGooglePopup,
+  syncUserProfileToFirestore,
+} from '../lib/firebase';
 import type {AppView, SettingsSection, UserProfile} from '../types';
 import {Avatar} from './MediaImage';
 
@@ -40,6 +61,7 @@ interface MenuViewProps {
   onToggleTheme: () => void;
   onNavigate: (view: AppView, profileId?: number) => void;
   onSwitchedAccount: (user: UserProfile, token: string) => void;
+  onAddAccount: (mode: 'login' | 'register') => void;
   onLogout: () => void;
   onOpenSettingsSection: (section: SettingsSection) => void;
 }
@@ -152,12 +174,28 @@ const SHORTCUTS: ShortcutItem[] = [
   },
 ];
 
+function isSameAccount(acc: VaultAccountRecord, user: UserProfile): boolean {
+  if (user.email && acc.email && user.email.trim().toLowerCase() === acc.email.trim().toLowerCase()) {
+    return true;
+  }
+  if (user.phone && acc.phone) {
+    const a = user.phone.replace(/\D/g, '');
+    const b = acc.phone.replace(/\D/g, '');
+    if (a && b && (a === b || a.endsWith(b.slice(-10)) || b.endsWith(a.slice(-10)))) {
+      return true;
+    }
+  }
+  if (acc.userId && acc.userId === user.id) return true;
+  return false;
+}
+
 export function MenuView({
   currentUser,
   theme,
   onToggleTheme,
   onNavigate,
   onSwitchedAccount,
+  onAddAccount,
   onLogout,
   onOpenSettingsSection,
 }: MenuViewProps) {
@@ -171,14 +209,34 @@ export function MenuView({
   const [settingsOpen, setSettingsOpen] = useState(true);
   const [copiedInvite, setCopiedInvite] = useState(false);
 
-  const [switchableAccounts, setSwitchableAccounts] = useState<UserProfile[]>([]);
-  const [switchingId, setSwitchingId] = useState<number | null>(null);
+  const [vaultAccounts, setVaultAccounts] = useState<VaultAccountRecord[]>([]);
+  const [switchingVaultId, setSwitchingVaultId] = useState<string | null>(null);
+  const [unlockTarget, setUnlockTarget] = useState<VaultAccountRecord | null>(null);
+  const [unlockPassword, setUnlockPassword] = useState('');
+  const [showUnlockPassword, setShowUnlockPassword] = useState(false);
+  const [unlockBusy, setUnlockBusy] = useState(false);
+  const [googleSwitchBusy, setGoogleSwitchBusy] = useState(false);
+  const [switchError, setSwitchError] = useState<string | null>(null);
+
+  const refreshSavedAccounts = useCallback(async () => {
+    const activeToken = getAuthToken();
+    if (activeToken) {
+      await saveAccountToVault({user: currentUser, sessionToken: activeToken}).catch(() => {});
+    }
+    const list = await listVaultAccounts().catch(() => []);
+    setVaultAccounts(list);
+  }, [currentUser]);
 
   useEffect(() => {
-    apiRequest<{accounts: UserProfile[]}>('/api/auth/switchable-accounts')
-      .then((data) => setSwitchableAccounts(data.accounts))
-      .catch(() => setSwitchableAccounts([]));
-  }, [currentUser.id]);
+    refreshSavedAccounts();
+  }, [refreshSavedAccounts]);
+
+  const otherSavedAccounts = useMemo(
+    () => vaultAccounts.filter((acc) => !isSameAccount(acc, currentUser)),
+    [vaultAccounts, currentUser],
+  );
+
+  const totalAccountsCount = 1 + otherSavedAccounts.length;
 
   const visibleShortcuts = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
@@ -191,17 +249,163 @@ export function MenuView({
     return list;
   }, [searchTerm, sortAlpha]);
 
-  async function handleQuickSwitch(userId: number) {
-    setSwitchingId(userId);
+  async function handleTapSavedAccount(acc: VaultAccountRecord) {
+    setSwitchError(null);
+
+    // Path A: Instant 1-tap Facebook-style switch using this account's saved device session token
+    if (acc.sessionToken) {
+      setSwitchingVaultId(acc.id);
+      try {
+        const res = await fetchMeWithToken<{user: UserProfile}>(acc.sessionToken);
+        await saveAccountToVault({
+          user: res.user,
+          authMethod: acc.authMethod,
+          firebaseUid: acc.firebaseUid,
+          sessionToken: acc.sessionToken,
+        });
+        setAuthToken(acc.sessionToken);
+        onSwitchedAccount(res.user, acc.sessionToken);
+        return;
+      } catch {
+        // Session expired or was logged out — clear stale token and open inline unlock
+        await clearVaultSessionToken(acc.id).catch(() => {});
+        setVaultAccounts((prev) =>
+          prev.map((item) => (item.id === acc.id ? {...item, sessionToken: null} : item)),
+        );
+      } finally {
+        setSwitchingVaultId(null);
+      }
+    }
+
+    // Path B: Account was logged out or server restarted — open compact inline login right here
+    setUnlockTarget(acc);
+    setUnlockPassword('');
+    setShowUnlockPassword(false);
+  }
+
+  async function handleUnlockWithPassword(e: FormEvent) {
+    e.preventDefault();
+    if (!unlockTarget) return;
+    setSwitchError(null);
+
+    const identifier = unlockTarget.email || unlockTarget.phone || '';
+    if (!identifier || !unlockPassword) {
+      setSwitchError('Enter your password to switch into this account.');
+      return;
+    }
+
+    setUnlockBusy(true);
     try {
-      const data = await apiRequest<{token: string; user: UserProfile}>('/api/auth/quick-switch', {
+      // Layer 1: Primary Express login
+      const data = await apiRequest<{token: string; user: UserProfile}>('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({userId}),
+        body: JSON.stringify({identifier, password: unlockPassword}),
+      });
+      await saveAccountToVault({
+        user: data.user,
+        password: unlockPassword,
+        authMethod: unlockTarget.authMethod,
+        firebaseUid: unlockTarget.firebaseUid,
+        sessionToken: data.token,
       });
       setAuthToken(data.token);
+      setUnlockTarget(null);
+      setUnlockPassword('');
       onSwitchedAccount(data.user, data.token);
+      return;
+    } catch (primaryErr) {
+      // Layer 2: Permanent Vault PBKDF2 verify + automatic /api/auth/restore if server restarted
+      try {
+        const verified = await verifyCredentialsInVault(identifier, unlockPassword);
+        if (verified) {
+          const restored = await apiRequest<{token: string; user: UserProfile}>(
+            '/api/auth/restore',
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                name: verified.name,
+                email: verified.email,
+                phone: verified.phone,
+                password: unlockPassword,
+                bio: verified.bio,
+                location: verified.location,
+                work: verified.work,
+                avatar_url: verified.avatar_url,
+                cover_url: verified.cover_url,
+                date_of_birth: verified.date_of_birth,
+                firebaseUid: verified.firebaseUid,
+              }),
+            },
+          );
+          await saveAccountToVault({
+            user: restored.user,
+            password: unlockPassword,
+            authMethod: verified.authMethod,
+            firebaseUid: verified.firebaseUid,
+            sessionToken: restored.token,
+          });
+          setAuthToken(restored.token);
+          setUnlockTarget(null);
+          setUnlockPassword('');
+          onSwitchedAccount(restored.user, restored.token);
+          return;
+        }
+      } catch {
+        // Fall through to primary error
+      }
+
+      if (unlockTarget.authMethod === 'google' && !unlockTarget.passwordHash) {
+        setSwitchError(
+          'This Gmail account uses Google Sign-In. Tap "Continue with Google" below to switch.',
+        );
+      } else {
+        setSwitchError(
+          primaryErr instanceof Error ? primaryErr.message : 'Incorrect password. Please try again.',
+        );
+      }
     } finally {
-      setSwitchingId(null);
+      setUnlockBusy(false);
+    }
+  }
+
+  async function handleUnlockWithGoogle() {
+    setSwitchError(null);
+    setGoogleSwitchBusy(true);
+    try {
+      const {user: fbUser, idToken} = await signInWithGooglePopup();
+      const fsProfile = await loadUserProfileFromFirestore(fbUser).catch(() => null);
+      const data = await apiRequest<{token: string; user: UserProfile}>('/api/auth/firebase-auth', {
+        method: 'POST',
+        body: JSON.stringify({
+          firebaseIdToken: idToken,
+          ...(fsProfile || {}),
+        }),
+      });
+      await syncUserProfileToFirestore(fbUser, data.user, 'google').catch(() => {});
+      await saveAccountToVault({
+        user: data.user,
+        authMethod: 'google',
+        firebaseUid: fbUser.uid,
+        sessionToken: data.token,
+      });
+      setAuthToken(data.token);
+      setUnlockTarget(null);
+      onSwitchedAccount(data.user, data.token);
+    } catch (err) {
+      setSwitchError(err instanceof Error ? err.message : 'Could not sign in with Google.');
+    } finally {
+      setGoogleSwitchBusy(false);
+    }
+  }
+
+  async function handleRemoveFromDevice(e: MouseEvent, vaultId: string) {
+    e.stopPropagation();
+    await removeVaultAccount(vaultId).catch(() => {});
+    setVaultAccounts((prev) => prev.filter((item) => item.id !== vaultId));
+    if (unlockTarget?.id === vaultId) {
+      setUnlockTarget(null);
+      setUnlockPassword('');
+      setSwitchError(null);
     }
   }
 
@@ -296,16 +500,16 @@ export function MenuView({
           </button>
 
           <div className="flex items-center gap-2 shrink-0">
-            {switchableAccounts[0] && (
+            {otherSavedAccounts[0] && (
               <button
                 type="button"
-                onClick={() => setSwitchOpen((prev) => !prev)}
-                title="Switch profile"
-                className="rounded-full ring-2 ring-[#E5E8EE] dark:ring-[#2D3342] p-0.5 cursor-pointer"
+                onClick={() => handleTapSavedAccount(otherSavedAccounts[0])}
+                title={`Switch to ${otherSavedAccounts[0].name}`}
+                className="rounded-full ring-2 ring-[#E5E8EE] dark:ring-[#2D3342] p-0.5 hover:ring-[#1877F2] transition-colors cursor-pointer"
               >
                 <Avatar
-                  src={switchableAccounts[0].avatar_url}
-                  name={switchableAccounts[0].name}
+                  src={otherSavedAccounts[0].avatar_url}
+                  name={otherSavedAccounts[0].name}
                   size="xs"
                 />
               </button>
@@ -352,16 +556,22 @@ export function MenuView({
         )}
       </div>
 
-      {/* Card 2: Switch Account */}
+      {/* Card 2: Facebook-style Switch Account */}
       <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl overflow-hidden">
         <button
           type="button"
-          onClick={() => setSwitchOpen((prev) => !prev)}
+          onClick={() => {
+            setSwitchOpen((prev) => !prev);
+            setSwitchError(null);
+          }}
           className="w-full px-4 py-3.5 flex items-center justify-between gap-3 hover:bg-[#F8FAFC] dark:hover:bg-[#1E222B] transition-colors cursor-pointer"
         >
           <div className="flex items-center gap-3 min-w-0">
             <div className="flex items-center -space-x-2 shrink-0">
-              {switchableAccounts.slice(0, 2).map((acc) => (
+              <div className="rounded-full ring-2 ring-white dark:ring-[#16191F]">
+                <Avatar src={currentUser.avatar_url} name={currentUser.name} size="xs" />
+              </div>
+              {otherSavedAccounts.slice(0, 2).map((acc) => (
                 <div
                   key={acc.id}
                   className="rounded-full ring-2 ring-white dark:ring-[#16191F]"
@@ -369,13 +579,17 @@ export function MenuView({
                   <Avatar src={acc.avatar_url} name={acc.name} size="xs" />
                 </div>
               ))}
-              {switchableAccounts.length === 0 && (
-                <Avatar src={currentUser.avatar_url} name={currentUser.name} size="xs" />
-              )}
             </div>
-            <span className="font-display font-semibold text-[15px] text-[#334155] dark:text-[#E2E8F0]">
-              Switch account
-            </span>
+            <div className="text-left min-w-0">
+              <p className="font-display font-semibold text-[15px] text-[#0F172A] dark:text-[#F1F5F9]">
+                Switch account
+              </p>
+              <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
+                {totalAccountsCount === 1
+                  ? '1 saved account · Add or create another'
+                  : `${totalAccountsCount} saved accounts on this device`}
+              </p>
+            </div>
           </div>
 
           <span className="w-9 h-9 rounded-full bg-[#F4F6F9] dark:bg-[#232732] flex items-center justify-center text-[#0F172A] dark:text-white shrink-0">
@@ -384,40 +598,196 @@ export function MenuView({
         </button>
 
         {switchOpen && (
-          <div className="px-3 pb-3 pt-1 border-t border-[#E5E8EE] dark:border-[#252A34] space-y-1">
-            {switchableAccounts.map((acc) => (
-              <button
-                key={acc.id}
-                type="button"
-                disabled={switchingId === acc.id}
-                onClick={() => handleQuickSwitch(acc.id)}
-                className="w-full px-3 py-2.5 rounded-xl flex items-center justify-between gap-3 hover:bg-[#F4F6F9] dark:hover:bg-[#232732] transition-colors text-left cursor-pointer"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <Avatar src={acc.avatar_url} name={acc.name} size="sm" />
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold text-[#0F172A] dark:text-white truncate">
-                      {acc.name}
-                    </p>
-                    <p className="text-xs text-[#64748B] dark:text-[#94A3B8] truncate">
-                      {acc.email || acc.work}
-                    </p>
-                  </div>
+          <div className="px-3 pb-3.5 pt-2 border-t border-[#E5E8EE] dark:border-[#252A34] space-y-1.5">
+            {/* Active Current Account Row */}
+            <div className="w-full px-3 py-2.5 rounded-xl bg-[#EFF6FF] dark:bg-[#1E3A8A]/20 border border-[#BFDBFE] dark:border-[#1E3A8A]/50 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <Avatar src={currentUser.avatar_url} name={currentUser.name} size="sm" />
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-[#0F172A] dark:text-white truncate">
+                    {currentUser.name}
+                  </p>
+                  <p className="text-xs text-[#64748B] dark:text-[#94A3B8] truncate">
+                    {currentUser.email || currentUser.phone || 'Active now'}
+                  </p>
                 </div>
-                <span className="text-xs font-semibold text-[#1877F2] dark:text-[#60A5FA] whitespace-nowrap">
-                  {switchingId === acc.id ? 'Switching...' : 'Switch'}
-                </span>
-              </button>
-            ))}
+              </div>
+              <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#1877F2] dark:text-[#60A5FA] shrink-0">
+                <CheckCircle2 className="w-4 h-4" />
+                <span>Active</span>
+              </span>
+            </div>
 
-            <button
-              type="button"
-              onClick={onLogout}
-              className="w-full px-3 py-2.5 rounded-xl flex items-center gap-2.5 text-sm font-semibold text-[#1877F2] dark:text-[#60A5FA] hover:bg-[#F4F6F9] dark:hover:bg-[#232732] transition-colors cursor-pointer"
-            >
-              <UserPlus className="w-4 h-4" />
-              <span>Sign in with another account or create new</span>
-            </button>
+            {/* All Other Saved Accounts Created / Logged In on This Device */}
+            {otherSavedAccounts.map((acc) => {
+              const isSwitching = switchingVaultId === acc.id;
+              const isUnlocking = unlockTarget?.id === acc.id;
+              const contactLabel = acc.email || acc.phone || 'Saved account';
+
+              return (
+                <div
+                  key={acc.id}
+                  className="rounded-xl border border-transparent hover:border-[#E5E8EE] dark:hover:border-[#252A34] bg-transparent"
+                >
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => !isSwitching && handleTapSavedAccount(acc)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        if (!isSwitching) handleTapSavedAccount(acc);
+                      }
+                    }}
+                    className="w-full px-3 py-2.5 rounded-xl flex items-center justify-between gap-3 hover:bg-[#F4F6F9] dark:hover:bg-[#232732] transition-colors text-left cursor-pointer"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <Avatar src={acc.avatar_url} name={acc.name} size="sm" />
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-[#0F172A] dark:text-white truncate">
+                          {acc.name}
+                        </p>
+                        <p className="text-xs text-[#64748B] dark:text-[#94A3B8] truncate">
+                          {contactLabel}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#1877F2] dark:text-[#60A5FA] whitespace-nowrap">
+                        {isSwitching && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        <span>
+                          {isSwitching
+                            ? 'Switching...'
+                            : acc.sessionToken
+                              ? 'Switch'
+                              : 'Log in'}
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        title="Remove account from this device"
+                        aria-label={`Remove ${acc.name} from Switch account`}
+                        onClick={(e) => handleRemoveFromDevice(e, acc.id)}
+                        className="p-1.5 rounded-full text-[#94A3B8] hover:text-[#DC2626] hover:bg-[#FEE2E2] dark:hover:bg-[#3B181A] transition-colors cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Inline Quick Unlock form if this account's session was logged out or expired */}
+                  {isUnlocking && (
+                    <form
+                      onSubmit={handleUnlockWithPassword}
+                      className="mx-2 mb-2 p-3 rounded-xl bg-[#F8FAFC] dark:bg-[#0E1014] border border-[#E5E8EE] dark:border-[#252A34] space-y-2.5"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs font-semibold text-[#0F172A] dark:text-white">
+                          Log in as {acc.name}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUnlockTarget(null);
+                            setUnlockPassword('');
+                            setSwitchError(null);
+                          }}
+                          className="text-xs text-[#64748B] hover:text-[#0F172A] dark:hover:text-white cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+
+                      {switchError && (
+                        <div className="flex items-start gap-2 p-2.5 rounded-lg bg-[#FEF2F2] dark:bg-[#3B181A] border border-[#FECACA] dark:border-[#7F1D1D] text-xs text-[#B91C1C] dark:text-[#FCA5A5]">
+                          <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          <span>{switchError}</span>
+                        </div>
+                      )}
+
+                      <div className="relative">
+                        <input
+                          type={showUnlockPassword ? 'text' : 'password'}
+                          autoFocus
+                          value={unlockPassword}
+                          onChange={(e) => setUnlockPassword(e.target.value)}
+                          placeholder="Enter password to switch"
+                          className="w-full h-10 pl-3 pr-10 rounded-xl bg-white dark:bg-[#16191F] border border-[#CBD5E1] dark:border-[#334155] text-sm text-[#0F172A] dark:text-white placeholder:text-[#94A3B8] focus:outline-none focus:ring-2 focus:ring-[#1877F2]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowUnlockPassword((prev) => !prev)}
+                          aria-label={showUnlockPassword ? 'Hide password' : 'Show password'}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-[#64748B] dark:text-[#94A3B8] cursor-pointer"
+                        >
+                          {showUnlockPassword ? (
+                            <EyeOff className="w-4 h-4" />
+                          ) : (
+                            <Eye className="w-4 h-4" />
+                          )}
+                        </button>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="submit"
+                          disabled={unlockBusy || googleSwitchBusy}
+                          className="flex-1 h-9 px-3 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] text-white text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-60 cursor-pointer"
+                        >
+                          {unlockBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                          <span>{unlockBusy ? 'Switching...' : 'Log In & Switch'}</span>
+                        </button>
+
+                        {acc.email && (
+                          <button
+                            type="button"
+                            disabled={unlockBusy || googleSwitchBusy}
+                            onClick={handleUnlockWithGoogle}
+                            className="h-9 px-3 rounded-xl bg-white dark:bg-[#1E222A] hover:bg-[#F1F5F9] dark:hover:bg-[#262B35] border border-[#CBD5E1] dark:border-[#334155] text-xs font-semibold text-[#0F172A] dark:text-white flex items-center gap-1.5 disabled:opacity-60 cursor-pointer"
+                          >
+                            {googleSwitchBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                            <span>Continue with Google</span>
+                          </button>
+                        )}
+                      </div>
+                    </form>
+                  )}
+                </div>
+              );
+            })}
+
+            {switchError && !unlockTarget && (
+              <div className="mx-1 flex items-start gap-2 p-2.5 rounded-xl bg-[#FEF2F2] dark:bg-[#3B181A] border border-[#FECACA] dark:border-[#7F1D1D] text-xs text-[#B91C1C] dark:text-[#FCA5A5]">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <span>{switchError}</span>
+              </div>
+            )}
+
+            {/* Facebook-style Add / Create Account Actions (keeps current session alive!) */}
+            <div className="pt-1.5 mt-1 border-t border-[#E5E8EE] dark:border-[#252A34] space-y-1">
+              <button
+                type="button"
+                onClick={() => onAddAccount('login')}
+                className="w-full px-3 py-2.5 rounded-xl flex items-center gap-3 text-sm font-semibold text-[#0F172A] dark:text-white hover:bg-[#F4F6F9] dark:hover:bg-[#232732] transition-colors cursor-pointer"
+              >
+                <span className="w-8 h-8 rounded-full bg-[#EFF6FF] dark:bg-[#1E3A8A]/40 text-[#1877F2] dark:text-[#60A5FA] flex items-center justify-center shrink-0">
+                  <LogIn className="w-4 h-4" />
+                </span>
+                <span>Log into another account</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onAddAccount('register')}
+                className="w-full px-3 py-2.5 rounded-xl flex items-center gap-3 text-sm font-semibold text-[#1877F2] dark:text-[#60A5FA] hover:bg-[#F4F6F9] dark:hover:bg-[#232732] transition-colors cursor-pointer"
+              >
+                <span className="w-8 h-8 rounded-full bg-[#EFF6FF] dark:bg-[#1E3A8A]/40 text-[#1877F2] dark:text-[#60A5FA] flex items-center justify-center shrink-0">
+                  <UserPlus className="w-4 h-4" />
+                </span>
+                <span>Create new account</span>
+              </button>
+            </div>
           </div>
         )}
       </div>

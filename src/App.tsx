@@ -37,7 +37,9 @@ import {PostCard} from './components/PostCard';
 import {PostComposer} from './components/PostComposer';
 import {ProfileView} from './components/ProfileView';
 import {SettingsView} from './components/SettingsView';
+import {clearVaultSessionToken, saveAccountToVault} from './lib/accountVault';
 import {apiRequest, getAuthToken, isUsingLocalFallback, setAuthToken} from './lib/api';
+import {auth, signOutFirebase, syncUserProfileToFirestore} from './lib/firebase';
 import type {
   AppView,
   AuthView,
@@ -269,6 +271,7 @@ export default function App() {
     apiRequest<{user: UserProfile}>('/api/auth/me')
       .then((data) => {
         setCurrentUser(data.user);
+        saveAccountToVault({user: data.user, sessionToken: token}).catch(() => {});
         const loc = parseLocation();
         if (
           loc.path === '/login' ||
@@ -482,24 +485,61 @@ export default function App() {
   }, [currentUser?.id, loadConversations, loadNetwork]);
 
   // Handlers
-  function handleAuthenticated(user: UserProfile) {
+  function handleUserUpdated(updated: UserProfile) {
+    setCurrentUser(updated);
+    saveAccountToVault({user: updated}).catch(() => {});
+    if (auth.currentUser) {
+      const method = auth.currentUser.phoneNumber ? 'phone_otp' : 'google';
+      syncUserProfileToFirestore(auth.currentUser, updated, method).catch(() => {});
+    }
+  }
+
+  function handleAuthenticated(user: UserProfile, token: string) {
+    saveAccountToVault({user, sessionToken: token}).catch(() => {});
     setCurrentUser(user);
+    setMessagesByPeer({});
+    setFloatingChatOpen(false);
+    setActiveChatPeer(null);
     // Always redirect authenticated users to Home
     window.history.replaceState({}, '', '/');
     setAppView('home');
     setActiveProfileId(user.id);
   }
 
-  async function handleLogout() {
-    try {
-      await apiRequest('/api/auth/logout', {method: 'POST'});
-    } catch {
-      // Proceed with local sign out
+  // Open Login or Create Account while keeping the current account's session token alive in the vault
+  // so the user can 1-tap switch back and forth between all their IDs just like Facebook.
+  function handleAddAccount(mode: 'login' | 'register') {
+    const activeToken = getAuthToken();
+    if (currentUser && activeToken) {
+      saveAccountToVault({user: currentUser, sessionToken: activeToken}).catch(() => {});
     }
     setAuthToken(null);
     setCurrentUser(null);
     setFloatingChatOpen(false);
     setActiveChatPeer(null);
+    setMessagesByPeer({});
+    const targetPath = mode === 'register' ? '/register' : '/login';
+    window.history.replaceState({}, '', targetPath);
+    setAuthView(mode);
+  }
+
+  async function handleLogout() {
+    const exitingIdentifier = currentUser?.email || currentUser?.phone || '';
+    try {
+      await apiRequest('/api/auth/logout', {method: 'POST'});
+    } catch {
+      // Proceed with local sign out
+    }
+    await signOutFirebase();
+    if (exitingIdentifier) {
+      await clearVaultSessionToken(exitingIdentifier).catch(() => {});
+    }
+    // Clear ONLY the active session token — NEVER delete saved accounts from vault, DB, or Firestore
+    setAuthToken(null);
+    setCurrentUser(null);
+    setFloatingChatOpen(false);
+    setActiveChatPeer(null);
+    setMessagesByPeer({});
     window.history.replaceState({}, '', '/login');
     setAuthView('login');
   }
@@ -1065,7 +1105,7 @@ export default function App() {
               <ProfileView
                 profileId={resolvedProfileId}
                 currentUser={currentUser}
-                onUserUpdated={(updated) => setCurrentUser(updated)}
+                onUserUpdated={handleUserUpdated}
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
                 onOpenChat={handleOpenChat}
                 onOpenAccountsCentre={() => {
@@ -1129,12 +1169,15 @@ export default function App() {
                 theme={theme}
                 onToggleTheme={toggleTheme}
                 onNavigate={navigateApp}
-                onSwitchedAccount={(switchedUser) => {
+                onSwitchedAccount={(switchedUser, newToken) => {
+                  setAuthToken(newToken);
                   setCurrentUser(switchedUser);
                   setFloatingChatOpen(false);
                   setActiveChatPeer(null);
+                  setMessagesByPeer({});
                   navigateApp('home');
                 }}
+                onAddAccount={handleAddAccount}
                 onLogout={handleLogout}
                 onOpenSettingsSection={(section) => {
                   setSettingsSection(section);
@@ -1153,7 +1196,7 @@ export default function App() {
                 onBackToMenu={() => navigateApp('menu')}
                 onOpenProfile={() => navigateApp('profile', currentUser.id)}
                 onOpenPages={() => navigateApp('pages')}
-                onUserUpdated={(updated) => setCurrentUser(updated)}
+                onUserUpdated={handleUserUpdated}
               />
             )}
 

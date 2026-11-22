@@ -28,6 +28,7 @@ import {
   UserCheck,
   UserRound,
 } from 'lucide-react';
+import {updateVaultPasswordByIdentifier} from '../lib/accountVault';
 import {apiRequest} from '../lib/api';
 import type {
   ActiveSessionItem,
@@ -716,6 +717,12 @@ export function SettingsView({
         method: 'POST',
         body: JSON.stringify({currentPassword, newPassword}),
       });
+      if (currentUser.email) {
+        await updateVaultPasswordByIdentifier(currentUser.email, newPassword).catch(() => {});
+      }
+      if (currentUser.phone) {
+        await updateVaultPasswordByIdentifier(currentUser.phone, newPassword).catch(() => {});
+      }
       setCurrentPassword('');
       setNewPassword('');
       setConfirmNewPassword('');

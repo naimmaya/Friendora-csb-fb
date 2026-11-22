@@ -29,14 +29,27 @@ export function setAuthToken(token: string | null) {
   }
 }
 
+export class ApiError extends Error {
+  code?: string;
+  status?: number;
+
+  constructor(message: string, code?: string, status?: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.code = code;
+    this.status = status;
+  }
+}
+
 export async function apiRequest<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
   const token = getAuthToken();
+  const isAuthEndpoint = path.startsWith('/api/auth/');
 
-  // If this token was created in local fallback mode or server is already known unavailable
-  if (useLocalFallback || (token && token.startsWith('local_'))) {
+  // Never let a stale local_ token bypass the live Express server on auth endpoints
+  if (!isAuthEndpoint && (useLocalFallback || (token && token.startsWith('local_')))) {
     return handleLocalFallbackRequest<T>(path, options, token);
   }
 
@@ -44,7 +57,7 @@ export async function apiRequest<T>(
     'Content-Type': 'application/json',
     ...((options.headers as Record<string, string>) || {}),
   };
-  if (token) {
+  if (token && !token.startsWith('local_')) {
     headers.Authorization = `Bearer ${token}`;
   }
 
@@ -55,24 +68,85 @@ export async function apiRequest<T>(
       headers,
     });
   } catch {
-    // Network unreachable — fall back seamlessly to local store
-    useLocalFallback = true;
+    // Network unreachable — fall back for this request without permanently blocking recovery
     return handleLocalFallbackRequest<T>(path, options, token);
   }
 
   const contentType = (res.headers.get('content-type') || '').toLowerCase();
   const isJson = contentType.includes('application/json');
 
-  // If the server returned non-JSON on an /api/* route (for example, Vercel static hosting
-  // returning an HTML 404/405 page or index.html SPA fallback), transparently switch to local mode.
-  if (!isJson && (res.status === 404 || res.status === 405 || res.status === 502 || res.status === 503 || res.ok)) {
-    useLocalFallback = true;
-    return handleLocalFallbackRequest<T>(path, options, token);
+  // If a static host (e.g., Vercel without backend) returned non-JSON 404/405/200 HTML for /api/*,
+  // use local fallback cleanly. Do NOT permanently latch on transient 502/503 restarts!
+  if (!isJson) {
+    if (res.status === 404 || res.status === 405 || res.ok) {
+      useLocalFallback = true;
+      return handleLocalFallbackRequest<T>(path, options, token);
+    }
+    if (res.status === 502 || res.status === 503 || res.status === 504) {
+      throw new ApiError('Server is restarting. Please wait a second and try again.', 'SERVER_RESTARTING', res.status);
+    }
+  } else {
+    // Live Express JSON response received — ensure we stay on the live server!
+    useLocalFallback = false;
   }
 
   const data = isJson ? await res.json().catch(() => ({})) : {};
   if (!res.ok) {
-    throw new Error((data as {error?: string}).error || 'Request failed. Please try again.');
+    const errPayload = data as {error?: string; code?: string};
+    throw new ApiError(
+      errPayload.error || 'Request failed. Please try again.',
+      errPayload.code,
+      res.status,
+    );
+  }
+  return data as T;
+}
+
+/**
+ * Verify a candidate session token against /api/auth/me without overwriting the active auth token.
+ * Used for 1-tap switching between previously authenticated accounts on this device.
+ */
+export async function fetchMeWithToken<T = {user: import('../types').UserProfile}>(
+  candidateToken: string,
+): Promise<T> {
+  if (!candidateToken) {
+    throw new ApiError('Session expired.', 'UNAUTHORIZED', 401);
+  }
+  if (candidateToken.startsWith('local_') || useLocalFallback) {
+    return handleLocalFallbackRequest<T>('/api/auth/me', {method: 'GET'}, candidateToken);
+  }
+
+  let res: Response;
+  try {
+    res = await fetch('/api/auth/me', {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${candidateToken}`,
+      },
+    });
+  } catch {
+    return handleLocalFallbackRequest<T>('/api/auth/me', {method: 'GET'}, candidateToken);
+  }
+
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  const isJson = contentType.includes('application/json');
+  if (!isJson) {
+    if (res.status === 404 || res.status === 405 || res.ok) {
+      useLocalFallback = true;
+      return handleLocalFallbackRequest<T>('/api/auth/me', {method: 'GET'}, candidateToken);
+    }
+    throw new ApiError('Server is restarting. Please try again.', 'SERVER_RESTARTING', res.status);
+  }
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const errPayload = data as {error?: string; code?: string};
+    throw new ApiError(
+      errPayload.error || 'Session expired. Please enter your password.',
+      errPayload.code,
+      res.status,
+    );
   }
   return data as T;
 }

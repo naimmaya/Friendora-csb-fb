@@ -1,4 +1,10 @@
 import {PRESET_AVATARS, PRESET_COVERS, PRESET_POST_PHOTOS} from './assets';
+import {
+  buildPhoneLookupCandidates,
+  normalizeToE164,
+  validateRealEmail,
+  validateRealPhone,
+} from './contactValidation';
 import type {
   ActiveSessionItem,
   ChatMessage,
@@ -80,227 +86,134 @@ function normalizeEmail(input: string): string | null {
 }
 
 function normalizePhone(input: string): string | null {
-  const pureDigits = input.trim().replace(/[^\d]/g, '');
-  if (pureDigits.length < 6 || pureDigits.length > 16) return null;
-  return `+${pureDigits}`;
+  return normalizeToE164(input, '+880');
 }
 
+function findUserByPhone(users: StoredUser[], rawPhone: string): StoredUser | undefined {
+  const candidates = new Set(buildPhoneLookupCandidates(rawPhone));
+  if (candidates.size === 0) return undefined;
+  return users.find((u) => {
+    if (!u.phone) return false;
+    return buildPhoneLookupCandidates(u.phone).some((c) => candidates.has(c));
+  });
+}
+
+function findUserByIdentifier(users: StoredUser[], raw: string): StoredUser | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.includes('@')) {
+    const email = normalizeEmail(trimmed);
+    if (!email) return undefined;
+    return users.find((u) => u.email && u.email.toLowerCase() === email);
+  }
+  return findUserByPhone(users, trimmed);
+}
+
+function decodeFirebaseJwtPayload(token: string): {
+  uid: string;
+  email: string | null;
+  emailVerified: boolean;
+  phoneNumber: string | null;
+  name: string;
+  picture: string;
+} | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
+    const json = JSON.parse(atob(padded)) as Record<string, unknown>;
+    const uid = String(json.user_id || json.sub || '');
+    if (!uid) return null;
+    const email = typeof json.email === 'string' ? json.email.trim().toLowerCase() : null;
+    const emailVerified = Boolean(json.email_verified);
+    const phoneNumber =
+      typeof json.phone_number === 'string' ? normalizeToE164(json.phone_number, '+880') : null;
+    const name = typeof json.name === 'string' ? json.name.trim() : '';
+    const picture = typeof json.picture === 'string' ? json.picture.trim() : '';
+    return {uid, email, emailVerified, phoneNumber, name, picture};
+  } catch {
+    return null;
+  }
+}
+
+const LEGACY_DEMO_EMAILS = new Set([
+  'maya@verve.social',
+  'devon@verve.social',
+  'priya@verve.social',
+  'lucas@verve.social',
+]);
+
 function createInitialStore(): LocalStore {
-  const now = Date.now();
-  const users: StoredUser[] = [
-    {
-      id: 1,
-      name: 'Maya Lin',
-      email: 'maya@verve.social',
-      phone: '+15550104200',
-      password: 'Password123!',
-      bio: 'Product designer sketching interfaces, shooting 35mm street frames, and testing coastal pour-overs.',
-      location: 'San Francisco, CA',
-      work: 'Lead Product Designer at Northstar',
-      avatar_url: PRESET_AVATARS[0].url,
-      cover_url: PRESET_COVERS[0].url,
-      date_of_birth: '1997-05-14',
-      created_at: new Date(now - 90 * 86400000).toISOString(),
-    },
-    {
-      id: 2,
-      name: 'Devon Brooks',
-      email: 'devon@verve.social',
-      phone: '+15550104201',
-      password: 'Password123!',
-      bio: 'Distributed systems architect by day, vinyl collector and neighborhood runner after sunset.',
-      location: 'Seattle, WA',
-      work: 'Staff Engineer at Cascade Cloud',
-      avatar_url: PRESET_AVATARS[1].url,
-      cover_url: PRESET_COVERS[1].url,
-      date_of_birth: '1995-08-22',
-      created_at: new Date(now - 80 * 86400000).toISOString(),
-    },
-    {
-      id: 3,
-      name: 'Priya Nair',
-      email: 'priya@verve.social',
-      phone: '+15550104202',
-      password: 'Password123!',
-      bio: 'Documentary photographer capturing twilight architecture, quiet morning rituals, and urban gardens.',
-      location: 'Brooklyn, NY',
-      work: 'Editorial Photographer at Fieldwork',
-      avatar_url: PRESET_AVATARS[2].url,
-      cover_url: PRESET_COVERS[0].url,
-      date_of_birth: '1998-03-09',
-      created_at: new Date(now - 70 * 86400000).toISOString(),
-    },
-    {
-      id: 4,
-      name: 'Lucas Meyer',
-      email: 'lucas@verve.social',
-      phone: '+15550104203',
-      password: 'Password123!',
-      bio: 'Urban mobility planner & weekend gravel cyclist. Always mapping better pedestrian corridors.',
-      location: 'Portland, OR',
-      work: 'Senior Planner at CivicLab',
-      avatar_url: PRESET_AVATARS[3].url,
-      cover_url: PRESET_COVERS[1].url,
-      date_of_birth: '1994-11-19',
-      created_at: new Date(now - 60 * 86400000).toISOString(),
-    },
-  ];
-
-  const posts: StoredPost[] = [
-    {
-      id: 101,
-      user_id: 3,
-      content:
-        'Slow Sunday morning before the rain rolled in. Found a sunlit corner table, a fresh pour-over, and finished my first roll of film.',
-      image_url: PRESET_POST_PHOTOS[0].url,
-      video_url: null,
-      created_at: new Date(now - 2 * 3600000).toISOString(),
-      reactions: {'1': 'love', '2': 'like', '4': 'wow'},
-      comments: [
-        {
-          id: 201,
-          post_id: 101,
-          user_id: 1,
-          content: 'The light across that table is unreal!',
-          created_at: new Date(now - 90 * 60000).toISOString(),
-          author_name: 'Maya Lin',
-          author_avatar: PRESET_AVATARS[0].url,
-        },
-      ],
-    },
-    {
-      id: 102,
-      user_id: 4,
-      content:
-        'Blue hour along the riverfront pedestrian bridge. Thoughtful lighting and car-free walkways completely transform the evening.',
-      image_url: PRESET_POST_PHOTOS[1].url,
-      video_url: null,
-      created_at: new Date(now - 5 * 3600000).toISOString(),
-      reactions: {'1': 'wow', '3': 'love'},
-      comments: [],
-    },
-    {
-      id: 103,
-      user_id: 2,
-      content:
-        'Shipped our new real-time messaging layer this afternoon. Try posting a photo or video above and tapping Like to pick any reaction!',
-      image_url: null,
-      video_url: null,
-      created_at: new Date(now - 9 * 3600000).toISOString(),
-      reactions: {'1': 'like', '3': 'care'},
-      comments: [],
-    },
-  ];
-
   return {
     nextId: 500,
-    users,
+    users: [],
     sessions: {},
     resets: {},
-    posts,
+    posts: [],
     savedPosts: {},
-    friendships: [
-      {id: 1, requester_id: 1, addressee_id: 2, status: 'accepted', created_at: new Date(now - 10 * 86400000).toISOString()},
-      {id: 2, requester_id: 1, addressee_id: 3, status: 'accepted', created_at: new Date(now - 8 * 86400000).toISOString()},
-      {id: 3, requester_id: 4, addressee_id: 1, status: 'pending', created_at: new Date(now - 3600000).toISOString()},
-    ],
-    follows: [
-      {follower_id: 1, following_id: 2},
-      {follower_id: 1, following_id: 3},
-      {follower_id: 2, following_id: 1},
-      {follower_id: 3, following_id: 1},
-    ],
-    messages: [
-      {
-        id: 301,
-        sender_id: 2,
-        receiver_id: 1,
-        content: 'Hey Maya! Ready to review the new profile updates?',
-        read: true,
-        created_at: new Date(now - 3 * 3600000).toISOString(),
-      },
-    ],
-    notifications: [
-      {
-        id: 401,
-        user_id: 1,
-        actor_id: 4,
-        actor_name: 'Lucas Meyer',
-        actor_avatar: PRESET_AVATARS[3].url,
-        type: 'friend_request',
-        entity_id: 4,
-        message: 'Lucas Meyer sent you a friend request.',
-        read: false,
-        created_at: new Date(now - 50 * 60000).toISOString(),
-      },
-    ],
+    friendships: [],
+    follows: [],
+    messages: [],
+    notifications: [],
     settingsByUser: {},
     securityByUser: {},
     passkeysByUser: {},
     linkedByUser: {},
     emailsByUser: {},
-    groups: [
-      {
-        id: 1,
-        name: '35mm Street & Architecture',
-        category: 'Photography',
-        description: 'Analog photography notes, film scans, and city light discussions.',
-        cover_url: PRESET_POST_PHOTOS[1].url,
-        members_count: 1,
-        joined: true,
-        memberIds: [1],
-      },
-    ],
-    marketplace: [
-      {
-        id: 1,
-        seller_id: 1,
-        seller_name: 'Maya Lin',
-        seller_avatar: PRESET_AVATARS[0].url,
-        title: 'Vintage 35mm Rangefinder Camera',
-        price: '$420',
-        category: 'Electronics',
-        location: 'San Francisco, CA',
-        description: 'Clean glass, accurate shutter speeds, includes leather neck strap.',
-        image_url: PRESET_POST_PHOTOS[0].url,
-        created_at: new Date(now - 86400000).toISOString(),
-      },
-    ],
-    events: [
-      {
-        id: 1,
-        title: 'Blue Hour Riverfront Photo Walk',
-        event_date: 'Sat, Nov 28 · 5:30 PM',
-        location: 'Waterfront Footbridge Plaza',
-        description: 'Casual evening walk shooting twilight city reflections.',
-        host_name: 'Maya Lin',
-        going_count: 1,
-        interested_count: 0,
-        my_rsvp: null,
-        rsvps: {'1': 'going'},
-      },
-    ],
-    pages: [
-      {
-        id: 1,
-        name: 'Northstar Design Journal',
-        category: 'Design Studio',
-        bio: 'Weekly case studies on clean product interfaces.',
-        avatar_url: PRESET_AVATARS[0].url,
-        followers_count: 1,
-        following: true,
-        followerIds: [1],
-        created_by: 1,
-      },
-    ],
+    groups: [],
+    marketplace: [],
+    events: [],
+    pages: [],
   };
+}
+
+function purgeLegacyDemoData(store: LocalStore): boolean {
+  const demoIds = new Set(
+    store.users
+      .filter((u) => u.email && LEGACY_DEMO_EMAILS.has(u.email.toLowerCase()))
+      .map((u) => u.id),
+  );
+  if (demoIds.size === 0) return false;
+
+  store.users = store.users.filter((u) => !demoIds.has(u.id));
+  store.posts = store.posts
+    .filter((p) => !demoIds.has(p.user_id))
+    .map((p) => ({
+      ...p,
+      comments: p.comments.filter((c) => !demoIds.has(c.user_id)),
+    }));
+  store.friendships = store.friendships.filter(
+    (f) => !demoIds.has(f.requester_id) && !demoIds.has(f.addressee_id),
+  );
+  store.follows = store.follows.filter(
+    (f) => !demoIds.has(f.follower_id) && !demoIds.has(f.following_id),
+  );
+  store.messages = store.messages.filter(
+    (m) => !demoIds.has(m.sender_id) && !demoIds.has(m.receiver_id),
+  );
+  store.notifications = store.notifications.filter(
+    (n) => !demoIds.has(n.user_id) && (!n.actor_id || !demoIds.has(n.actor_id)),
+  );
+  store.marketplace = store.marketplace.filter((item) => !demoIds.has(item.seller_id));
+  store.pages = store.pages.filter((page) => !demoIds.has(page.created_by));
+  store.groups = store.groups.filter((g) => !(g.id === 1 && g.name === '35mm Street & Architecture'));
+  store.events = store.events.filter((e) => !(e.id === 1 && e.title === 'Blue Hour Riverfront Photo Walk'));
+  for (const [token, sess] of Object.entries(store.sessions)) {
+    if (demoIds.has(sess.userId)) delete store.sessions[token];
+  }
+  return true;
 }
 
 function loadStore(): LocalStore {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      return JSON.parse(raw) as LocalStore;
+      const parsed = JSON.parse(raw) as LocalStore;
+      if (purgeLegacyDemoData(parsed)) {
+        saveStore(parsed);
+      }
+      return parsed;
     }
   } catch {
     // Corrupted or unavailable storage
@@ -509,6 +422,53 @@ export async function handleLocalFallbackRequest<T>(
   };
 
   // --- AUTH ---
+  if (pathname === '/api/auth/capabilities' && method === 'GET') {
+    return {emailOtpReady: false, smsTwilioReady: false, googleReady: true} as T;
+  }
+
+  if (pathname === '/api/auth/check-contact' && method === 'POST') {
+    const channel = body.channel === 'phone' ? 'phone' : 'email';
+    const contact = String(body.contact || '');
+    if (channel === 'email') {
+      const check = validateRealEmail(contact);
+      if (!check.valid) throw new Error(check.error);
+      if (store.users.some((u) => u.email && u.email.toLowerCase() === check.email)) {
+        throw new Error('An account with this email already exists. Please sign in.');
+      }
+      return {valid: true, normalized: check.email} as T;
+    }
+    const check = validateRealPhone(contact);
+    if (!check.valid) throw new Error(check.error);
+    if (findUserByPhone(store.users, check.phone)) {
+      throw new Error('An account with this phone number already exists. Please sign in.');
+    }
+    return {valid: true, normalized: check.phone} as T;
+  }
+
+  if (pathname === '/api/auth/otp/send' && method === 'POST') {
+    const channel = body.channel === 'phone' ? 'phone' : 'email';
+    if (channel === 'email') {
+      const check = validateRealEmail(String(body.contact || ''));
+      if (!check.valid) throw new Error(check.error);
+      const err = new Error(
+        'Real email OTP requires SMTP credentials on the backend server. Use "Verify Real Gmail with Google" below to verify instantly.',
+      ) as Error & {code?: string};
+      err.code = 'SMTP_NOT_CONFIGURED';
+      throw err;
+    }
+    const check = validateRealPhone(String(body.contact || ''));
+    if (!check.valid) throw new Error(check.error);
+    const err = new Error(
+      'Real SMS OTP requires Firebase Phone Auth enabled in Firebase Console or Twilio credentials on the backend server.',
+    ) as Error & {code?: string};
+    err.code = 'SMS_NOT_CONFIGURED';
+    throw err;
+  }
+
+  if (pathname === '/api/auth/otp/verify' && method === 'POST') {
+    throw new Error('OTP verification requires an active verification session. Please verify via Firebase.');
+  }
+
   if (pathname === '/api/auth/register' && method === 'POST') {
     const name = String(body.name || '').trim();
     const password = String(body.password || '');
@@ -522,25 +482,43 @@ export async function handleLocalFallbackRequest<T>(
     let email: string | null = null;
     let phone: string | null = null;
     if (body.email && String(body.email).trim()) {
-      email = normalizeEmail(String(body.email));
-      if (!email) throw new Error('Please enter a valid email address (e.g., name@gmail.com).');
+      const check = validateRealEmail(String(body.email));
+      if (!check.valid) throw new Error(check.error);
+      email = check.email;
     }
     if (body.phone && String(body.phone).trim()) {
-      phone = normalizePhone(String(body.phone));
-      if (!phone) throw new Error('Please enter a valid phone number (6–16 digits).');
-    }
-    if (!email && !phone && body.identifier) {
-      const idVal = String(body.identifier).trim();
-      if (idVal.includes('@')) email = normalizeEmail(idVal);
-      else phone = normalizePhone(idVal);
+      const check = validateRealPhone(String(body.phone));
+      if (!check.valid) throw new Error(check.error);
+      phone = check.phone;
     }
     if (!email && !phone) {
-      throw new Error('Provide an email/Gmail address or a phone number to sign up.');
+      throw new Error('Provide a real Gmail/email address or a real phone number.');
     }
-    if (email && store.users.some((u) => u.email === email)) {
+
+    const fbToken = typeof body.firebaseIdToken === 'string' ? body.firebaseIdToken.trim() : '';
+    const fb = fbToken ? decodeFirebaseJwtPayload(fbToken) : null;
+    let verifiedOk = false;
+    if (fb) {
+      if (email && fb.email === email && fb.emailVerified) {
+        verifiedOk = true;
+      } else if (phone && fb.phoneNumber) {
+        const targetSet = new Set(buildPhoneLookupCandidates(phone));
+        if (buildPhoneLookupCandidates(fb.phoneNumber).some((c) => targetSet.has(c))) {
+          verifiedOk = true;
+          phone = fb.phoneNumber;
+        }
+      }
+    }
+    if (!verifiedOk) {
+      throw new Error(
+        'Verification required. Please click "Send Code" and verify your real Gmail or phone number before creating an account.',
+      );
+    }
+
+    if (email && store.users.some((u) => u.email && u.email.toLowerCase() === email)) {
       throw new Error('An account with this email already exists. Try signing in.');
     }
-    if (phone && store.users.some((u) => u.phone === phone)) {
+    if (phone && findUserByPhone(store.users, phone)) {
       throw new Error('An account with this phone number already exists. Try signing in.');
     }
 
@@ -554,7 +532,7 @@ export async function handleLocalFallbackRequest<T>(
       bio: 'New on Verve — sharing ideas, photos, videos, and updates.',
       location: '',
       work: '',
-      avatar_url: PRESET_AVATARS[0].url,
+      avatar_url: fb?.picture || PRESET_AVATARS[0].url,
       cover_url: PRESET_COVERS[0].url,
       date_of_birth: '',
       created_at: new Date().toISOString(),
@@ -568,7 +546,7 @@ export async function handleLocalFallbackRequest<T>(
       actor_avatar: null,
       type: 'welcome',
       entity_id: null,
-      message: 'Welcome to Verve! Share photos, videos, and customize your profile anytime.',
+      message: 'Welcome to Verve! Your account is verified and saved permanently.',
       read: false,
       created_at: new Date().toISOString(),
     });
@@ -582,18 +560,104 @@ export async function handleLocalFallbackRequest<T>(
     return {token: newToken, user: sanitizeUser(store, newUser, newId)} as T;
   }
 
+  if (pathname === '/api/auth/firebase-auth' && method === 'POST') {
+    const fbToken = typeof body.firebaseIdToken === 'string' ? body.firebaseIdToken.trim() : '';
+    const fb = fbToken ? decodeFirebaseJwtPayload(fbToken) : null;
+    if (!fb || !((fb.email && fb.emailVerified) || fb.phoneNumber)) {
+      throw new Error('Invalid or unverified Firebase authentication token.');
+    }
+
+    let user =
+      (fb.email ? store.users.find((u) => u.email && u.email.toLowerCase() === fb.email) : undefined) ||
+      (fb.phoneNumber ? findUserByPhone(store.users, fb.phoneNumber) : undefined);
+
+    if (user) {
+      if (typeof body.password === 'string' && body.password.length >= 6) {
+        user.password = body.password;
+      }
+    } else {
+      const newId = ++store.nextId;
+      user = {
+        id: newId,
+        name: String(body.name || fb.name || 'Verve Member').trim().slice(0, 60) || 'Verve Member',
+        email: fb.email,
+        phone: fb.phoneNumber,
+        password:
+          typeof body.password === 'string' && body.password.length >= 6
+            ? body.password
+            : makeToken(),
+        bio: String(body.bio || 'New on Verve — sharing ideas, moments, and updates.').slice(0, 320),
+        location: String(body.location || '').slice(0, 80),
+        work: String(body.work || '').slice(0, 100),
+        avatar_url: String(body.avatar_url || fb.picture || PRESET_AVATARS[0].url),
+        cover_url: String(body.cover_url || PRESET_COVERS[0].url),
+        date_of_birth: String(body.date_of_birth || '').slice(0, 20),
+        created_at: new Date().toISOString(),
+      };
+      store.users.push(user);
+    }
+
+    const newToken = makeToken();
+    store.sessions[newToken] = {
+      userId: user.id,
+      device_name: 'This Device',
+      created_at: new Date().toISOString(),
+    };
+    saveStore(store);
+    return {token: newToken, user: sanitizeUser(store, user, user.id)} as T;
+  }
+
+  if (pathname === '/api/auth/restore' && method === 'POST') {
+    const password = String(body.password || '');
+    if (password.length < 6) {
+      throw new Error('Invalid email/phone or password. Please try again.');
+    }
+    const email = body.email ? normalizeEmail(String(body.email)) : null;
+    const phone = body.phone ? normalizePhone(String(body.phone)) : null;
+    if (!email && !phone) throw new Error('Invalid account credentials.');
+
+    let user =
+      (email ? store.users.find((u) => u.email && u.email.toLowerCase() === email) : undefined) ||
+      (phone ? findUserByPhone(store.users, phone) : undefined);
+
+    if (user) {
+      if (user.password !== password) {
+        throw new Error('Invalid email/phone or password. Please try again.');
+      }
+    } else {
+      const newId = ++store.nextId;
+      user = {
+        id: newId,
+        name: String(body.name || 'Verve Member').trim().slice(0, 60) || 'Verve Member',
+        email,
+        phone,
+        password,
+        bio: String(body.bio || '').slice(0, 320),
+        location: String(body.location || '').slice(0, 80),
+        work: String(body.work || '').slice(0, 100),
+        avatar_url: String(body.avatar_url || PRESET_AVATARS[0].url),
+        cover_url: String(body.cover_url || PRESET_COVERS[0].url),
+        date_of_birth: String(body.date_of_birth || '').slice(0, 20),
+        created_at: new Date().toISOString(),
+      };
+      store.users.push(user);
+    }
+
+    const newToken = makeToken();
+    store.sessions[newToken] = {
+      userId: user.id,
+      device_name: 'This Device',
+      created_at: new Date().toISOString(),
+    };
+    saveStore(store);
+    return {token: newToken, user: sanitizeUser(store, user, user.id)} as T;
+  }
+
   if (pathname === '/api/auth/login' && method === 'POST') {
     const raw = String(body.identifier || '').trim();
     const password = String(body.password || '');
     if (!raw || !password) throw new Error('Enter your email or phone number and password.');
-    let user: StoredUser | undefined;
-    if (raw.includes('@')) {
-      const email = normalizeEmail(raw);
-      user = store.users.find((u) => u.email === email);
-    } else {
-      const phone = normalizePhone(raw);
-      user = store.users.find((u) => u.phone === phone);
-    }
+    const user = findUserByIdentifier(store.users, raw);
     if (!user || user.password !== password) {
       throw new Error('Invalid email/phone or password. Please try again.');
     }
@@ -620,12 +684,7 @@ export async function handleLocalFallbackRequest<T>(
 
   if (pathname === '/api/auth/forgot-password' && method === 'POST') {
     const raw = String(body.identifier || '').trim();
-    let user: StoredUser | undefined;
-    if (raw.includes('@')) {
-      user = store.users.find((u) => u.email === normalizeEmail(raw));
-    } else {
-      user = store.users.find((u) => u.phone === normalizePhone(raw));
-    }
+    const user = findUserByIdentifier(store.users, raw);
     if (!user) throw new Error('No account found matching that email address or phone number.');
     const resetToken = makeToken().replace('local_', 'rst_');
     store.resets[resetToken] = {
@@ -658,25 +717,13 @@ export async function handleLocalFallbackRequest<T>(
   }
 
   if (pathname === '/api/auth/switchable-accounts' && method === 'GET') {
-    const me = getAuthedUser();
-    const accounts = store.users
-      .filter((u) => u.id !== me.id && u.id <= 4)
-      .map((u) => sanitizeUser(store, u, me.id));
-    return {accounts} as T;
+    getAuthedUser();
+    return {accounts: []} as T;
   }
 
   if (pathname === '/api/auth/quick-switch' && method === 'POST') {
     getAuthedUser();
-    const target = store.users.find((u) => u.id === Number(body.userId));
-    if (!target) throw new Error('Account not found.');
-    const newToken = makeToken();
-    store.sessions[newToken] = {
-      userId: target.id,
-      device_name: 'This Device',
-      created_at: new Date().toISOString(),
-    };
-    saveStore(store);
-    return {token: newToken, user: sanitizeUser(store, target, target.id)} as T;
+    throw new Error('Use password login to switch accounts.');
   }
 
   // --- UPLOAD ---
