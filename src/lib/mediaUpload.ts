@@ -12,9 +12,9 @@ import {compressImageForFirestore} from './firestoreStore';
 export const MAX_VIDEO_BYTES = 100 * 1024 * 1024; // 100 MB
 export const MAX_VIDEO_DURATION_SEC = 60; // 60 seconds
 
-// Remember when Firebase Storage bucket is unavailable/unconfigured in this session
-// so subsequent uploads fail over instantaneously instead of waiting on every file.
-let firebaseStorageUnavailable = false;
+// Temporarily back off Firebase Storage if bucket is unconfigured/unreachable
+// so uploads fail over quickly without permanently locking out retries.
+let firebaseStorageBackoffUntil = 0;
 
 function sanitizeFileName(name: string): string {
   return (name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
@@ -129,7 +129,7 @@ export async function extractVideoMetadata(file: File | Blob): Promise<VideoMeta
   return new Promise((resolve) => {
     const objectUrl = URL.createObjectURL(file);
     const video = document.createElement('video');
-    video.preload = 'metadata';
+    video.preload = 'auto';
     video.muted = true;
     video.playsInline = true;
     video.crossOrigin = 'anonymous';
@@ -154,21 +154,27 @@ export async function extractVideoMetadata(file: File | Blob): Promise<VideoMeta
       });
     }, 6000);
 
+    let frameCaptured = false;
     const captureFrame = () => {
+      if (frameCaptured) return;
+      frameCaptured = true;
       const durationSec = Number.isFinite(video.duration) ? Math.round(video.duration) : 0;
       const w = video.videoWidth || 640;
       const h = video.videoHeight || 360;
       let thumbnailDataUrl: string | null = null;
       try {
-        const scale = Math.min(1, 720 / Math.max(w, h));
+        const scale = Math.min(1, 640 / Math.max(w, h));
         const canvas = document.createElement('canvas');
         canvas.width = Math.max(1, Math.round(w * scale));
         canvas.height = Math.max(1, Math.round(h * scale));
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          const candidate = canvas.toDataURL('image/jpeg', 0.72);
-          if (candidate.length <= 350000) {
+          let candidate = canvas.toDataURL('image/jpeg', 0.72);
+          if (candidate.length > 160000) {
+            candidate = canvas.toDataURL('image/jpeg', 0.52);
+          }
+          if (candidate.length <= 240000) {
             thumbnailDataUrl = candidate;
           }
         }
@@ -179,8 +185,19 @@ export async function extractVideoMetadata(file: File | Blob): Promise<VideoMeta
     };
 
     video.onloadedmetadata = () => {
+      // Capture the 1-second frame (or midpoint for sub-1s clips)
       const targetTime =
-        Number.isFinite(video.duration) && video.duration > 0.6 ? 0.5 : 0;
+        Number.isFinite(video.duration) && video.duration >= 1.1
+          ? 1.0
+          : Number.isFinite(video.duration) && video.duration > 0.2
+            ? Math.min(0.5, video.duration * 0.5)
+            : 0;
+      if (targetTime <= 0) {
+        if (video.readyState >= 2) {
+          captureFrame();
+        }
+        return;
+      }
       try {
         video.currentTime = targetTime;
       } catch {
@@ -190,6 +207,12 @@ export async function extractVideoMetadata(file: File | Blob): Promise<VideoMeta
 
     video.onseeked = () => {
       captureFrame();
+    };
+
+    video.onloadeddata = () => {
+      if (video.currentTime === 0 && (!Number.isFinite(video.duration) || video.duration <= 0.2)) {
+        captureFrame();
+      }
     };
 
     video.onerror = () => {
@@ -205,6 +228,7 @@ function uploadToFirebaseStorageWithStallGuard(
   storagePath: string,
   contentType: string,
   onProgress?: (percent: number) => void,
+  stallTimeoutMs = 6000,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const storageRef = ref(storage, storagePath);
@@ -219,12 +243,12 @@ function uploadToFirebaseStorageWithStallGuard(
     let settled = false;
     let lastBytes = 0;
 
-    // Fast stall guard: if 0 bytes transfer within 3.5 seconds (bucket disabled / CORS blocked),
-    // cancel immediately instead of waiting for Firebase's default 10-minute retry loop!
+    // Stall guard: if 0 bytes transfer within stallTimeoutMs (bucket disabled / CORS blocked),
+    // cancel cleanly instead of waiting for Firebase's default 10-minute retry loop.
     const stallTimer = window.setTimeout(() => {
       if (!settled && lastBytes === 0) {
         settled = true;
-        firebaseStorageUnavailable = true;
+        firebaseStorageBackoffUntil = Date.now() + 30_000;
         try {
           task.cancel();
         } catch {
@@ -232,7 +256,7 @@ function uploadToFirebaseStorageWithStallGuard(
         }
         reject(new Error('Firebase Storage did not respond.'));
       }
-    }, 3500);
+    }, stallTimeoutMs);
 
     task.on(
       'state_changed',
@@ -254,11 +278,11 @@ function uploadToFirebaseStorageWithStallGuard(
         if (
           code === 'storage/unauthorized' ||
           code === 'storage/bucket-not-found' ||
-          code === 'storage/project-not-found' ||
-          code === 'storage/unknown' ||
-          code === 'storage/retry-limit-exceeded'
+          code === 'storage/project-not-found'
         ) {
-          firebaseStorageUnavailable = true;
+          firebaseStorageBackoffUntil = Date.now() + 5 * 60_000;
+        } else if (code === 'storage/unknown' || code === 'storage/retry-limit-exceeded') {
+          firebaseStorageBackoffUntil = Date.now() + 30_000;
         }
         reject(err);
       },
@@ -369,10 +393,11 @@ export async function uploadAttachmentReal(
     folder: string;
     kind: 'image' | 'video' | 'voice' | 'document';
     fileName?: string;
+    exactStoragePath?: string;
     onProgress?: (percent: number) => void;
   },
 ): Promise<UploadedAttachment> {
-  const {folder, kind, onProgress} = options;
+  const {folder, kind, exactStoragePath, onProgress} = options;
   const rawName =
     options.fileName ||
     (fileOrBlob instanceof File
@@ -406,23 +431,29 @@ export async function uploadAttachmentReal(
   }
 
   const cleanFolder = folder.replace(/^\/+|\/+$/g, '') || 'media';
-  const storagePath = `${cleanFolder}/${Date.now()}_${safeName}`;
+  const storagePath = exactStoragePath
+    ? exactStoragePath.replace(/^\/+/, '')
+    : `${cleanFolder}/${Date.now()}_${safeName}`;
 
-  // 1. Primary path: Real Firebase Storage resumable upload (with 3.5s stall guard)
-  if (!firebaseStorageUnavailable) {
+  // 1. Primary path: Real Firebase Storage resumable upload (posts/{postId}/video.mp4)
+  if (Date.now() >= firebaseStorageBackoffUntil) {
     try {
       const downloadUrl = await uploadToFirebaseStorageWithStallGuard(
         preparedBlob,
         storagePath,
         mime,
         onProgress,
+        kind === 'video' ? 10000 : 5000,
       );
-      return {
-        url: downloadUrl,
-        name: rawName.slice(0, 180),
-        size: preparedBlob.size,
-        storageBacked: true,
-      };
+      if (downloadUrl && downloadUrl.trim()) {
+        firebaseStorageBackoffUntil = 0;
+        return {
+          url: downloadUrl,
+          name: rawName.slice(0, 180),
+          size: preparedBlob.size,
+          storageBacked: true,
+        };
+      }
     } catch {
       // Fail over cleanly below without hanging
     }
@@ -497,6 +528,40 @@ export async function uploadAttachmentReal(
  * Delete a media object from Firebase Storage if the URL points to Firebase Storage.
  * Safe no-op for non-Storage URLs or already-deleted objects.
  */
+/**
+ * Re-fetch a fresh downloadURL from Firebase Storage if a stored video URL is a Storage URL or gs:// path.
+ */
+export async function refreshFirebaseStorageUrl(url: string | null | undefined): Promise<string | null> {
+  if (!url) return null;
+  const isStorageUrl =
+    url.startsWith('https://firebasestorage.googleapis.com/') ||
+    url.startsWith('https://storage.googleapis.com/') ||
+    url.startsWith('gs://');
+  if (!isStorageUrl) return null;
+  try {
+    const fileRef = ref(storage, url);
+    const fresh = await getDownloadURL(fileRef);
+    return fresh || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Look up a post's video file at posts/{postId}/video.mp4 in Firebase Storage
+ * to recover playback for older posts if needed.
+ */
+export async function getPostVideoStorageUrl(postId: string | null | undefined): Promise<string | null> {
+  if (!postId || !/^[a-zA-Z0-9_-]{1,128}$/.test(postId)) return null;
+  try {
+    const fileRef = ref(storage, `posts/${postId}/video.mp4`);
+    const fresh = await getDownloadURL(fileRef);
+    return fresh || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function deleteFirebaseStorageUrlIfApplicable(
   url: string | null | undefined,
 ): Promise<void> {

@@ -31,7 +31,7 @@ import type {
   ReactionType,
   UserProfile,
 } from '../types';
-import {Avatar, CoverImage, useResolvedMediaUrl} from './MediaImage';
+import {Avatar, CoverImage, PostVideo, useResolvedMediaUrl} from './MediaImage';
 import {PostCard} from './PostCard';
 import {ReactionActionButton} from './ReactionPicker';
 
@@ -870,24 +870,19 @@ function ReelCard({
   onToggleLike: (postId: number, reaction?: ReactionType) => void;
   onOpenProfile: (id: number) => void;
 }) {
-  const resolvedVideo = useResolvedMediaUrl(post.video_url);
+  const isVideoPost = post.media_type === 'video' || Boolean(post.video_url);
   const resolvedImage = useResolvedMediaUrl(post.image_url);
 
   return (
     <div className="relative aspect-[3/4] rounded-2xl border border-[#E4E6EB] dark:border-[#2E3035] bg-[#0F1115]">
       <div className="absolute inset-0 rounded-2xl overflow-hidden">
-        {post.video_url ? (
-          resolvedVideo ? (
-            <video
-              src={resolvedVideo}
-              controls
-              playsInline
-              preload="metadata"
-              className="w-full h-full object-cover bg-black"
-            />
-          ) : (
-            <div className="w-full h-full bg-black animate-pulse" />
-          )
+        {isVideoPost ? (
+          <PostVideo
+            src={post.video_url || ''}
+            poster={post.video_thumbnail || post.image_url}
+            postId={post.docId}
+            className="h-full border-y-0"
+          />
         ) : resolvedImage ? (
           <img
             src={resolvedImage}

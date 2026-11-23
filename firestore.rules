@@ -212,6 +212,8 @@ service cloud.firestore {
           'content',
           'imageUrl',
           'videoUrl',
+          'mediaType',
+          'videoThumbnail',
           'commentsDisabled',
           'edited',
           'pageId',
@@ -240,6 +242,8 @@ service cloud.firestore {
         && data.imageUrl.size() <= 550000
         && data.videoUrl is string
         && data.videoUrl.size() <= 2048
+        && (!('mediaType' in data) || (data.mediaType is string && data.mediaType in ['text', 'image', 'video']))
+        && (!('videoThumbnail' in data) || (data.videoThumbnail is string && data.videoThumbnail.size() <= 550000))
         && (data.content.size() > 0 || data.imageUrl.size() > 0 || data.videoUrl.size() > 0)
         && (!('commentsDisabled' in data) || data.commentsDisabled is bool)
         && (!('edited' in data) || data.edited is bool)
@@ -1346,6 +1350,8 @@ service cloud.firestore {
           'content',
           'imageUrl',
           'videoUrl',
+          'mediaType',
+          'videoThumbnail',
           'commentsDisabled',
           'edited',
           'updatedAt'

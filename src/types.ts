@@ -72,6 +72,8 @@ export interface PostItem {
   content: string;
   image_url: string | null;
   video_url?: string | null;
+  media_type?: 'text' | 'image' | 'video';
+  video_thumbnail?: string | null;
   comments_disabled?: boolean;
   edited?: boolean;
   page_id?: string | null;

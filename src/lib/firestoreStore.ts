@@ -484,14 +484,48 @@ export function subscribePostsPermanent(
               // Keep base post visible even if subcollection read fails transiently
             }
 
+            const rawVideoField =
+              typeof data.videoUrl === 'string' && data.videoUrl.trim() ? data.videoUrl.trim() : null;
+            const rawImageField =
+              typeof data.imageUrl === 'string' && data.imageUrl.trim() ? data.imageUrl.trim() : null;
+            const looksLikeVideo = (url: string | null): boolean => {
+              if (!url) return false;
+              const lower = url.toLowerCase();
+              if (lower.startsWith('data:video/')) return true;
+              if (/\/uploads\/(?:.+\/)?vid_/.test(lower)) return true;
+              const noQuery = lower.split('?')[0].split('#')[0];
+              return (
+                /\.(mp4|webm|mov|m4v|ogv|ogg|3gp|mkv)$/i.test(noQuery) ||
+                lower.includes('%2fvideo.mp4') ||
+                lower.includes('/video.mp4')
+              );
+            };
+            const legacyVideoInImage = !rawVideoField && looksLikeVideo(rawImageField);
+            const rawVideoUrl = rawVideoField || (legacyVideoInImage ? rawImageField : null);
+            const rawImageUrl = legacyVideoInImage ? null : rawImageField;
+            const rawVideoThumb =
+              typeof data.videoThumbnail === 'string' && data.videoThumbnail.trim()
+                ? data.videoThumbnail.trim()
+                : rawVideoUrl
+                  ? rawImageUrl
+                  : null;
+            const resolvedMediaType: 'text' | 'image' | 'video' =
+              data.mediaType === 'video' || Boolean(rawVideoUrl)
+                ? 'video'
+                : data.mediaType === 'image' || Boolean(rawImageUrl)
+                  ? 'image'
+                  : 'text';
+
             return {
               id: postNumericId,
               docId: d.id,
               user_id: uidToNumericId(authorUid),
               author_uid: authorUid,
               content: String(data.content || ''),
-              image_url: typeof data.imageUrl === 'string' && data.imageUrl ? data.imageUrl : null,
-              video_url: typeof data.videoUrl === 'string' && data.videoUrl ? data.videoUrl : null,
+              image_url: rawImageUrl,
+              video_url: rawVideoUrl,
+              media_type: resolvedMediaType,
+              video_thumbnail: rawVideoThumb,
               comments_disabled: Boolean(data.commentsDisabled),
               edited: Boolean(data.edited),
               page_id: typeof data.pageId === 'string' && data.pageId ? data.pageId : null,
@@ -526,15 +560,23 @@ export function subscribePostsPermanent(
   );
 }
 
+export function generatePostDocId(): string {
+  return makeDocId('post');
+}
+
 /**
- * Create a new post in Cloud Firestore FIRST. Throws real Firestore error if write fails.
+ * Create a new post in Cloud Firestore FIRST (after media upload completes).
+ * Throws real Firestore error if write fails or if a video post has an empty videoUrl.
  */
 export async function createPostPermanent(
   author: UserProfile,
   payload: {
+    postId?: string;
     content: string;
     imageUrl?: string | null;
     videoUrl?: string | null;
+    videoThumbnail?: string | null;
+    mediaType?: 'text' | 'image' | 'video';
     page?: SocialPageDoc | null;
   },
 ): Promise<PostItem> {
@@ -544,12 +586,22 @@ export async function createPostPermanent(
   const cleanContent = clamp(payload.content, 2000);
   const cleanImage = clamp(payload.imageUrl, 550000);
   const cleanVideo = clamp(payload.videoUrl, 2048);
+  const cleanThumbnail = clamp(payload.videoThumbnail ?? (cleanVideo ? cleanImage : ''), 550000);
+
+  if (payload.mediaType === 'video' && !cleanVideo) {
+    throw new Error('Video upload did not finish. Please try uploading again.');
+  }
   if (!cleanContent && !cleanImage && !cleanVideo) {
     throw new Error('Write something or attach a photo/video before posting.');
   }
 
+  const resolvedMediaType: 'text' | 'image' | 'video' =
+    payload.mediaType || (cleanVideo ? 'video' : cleanImage ? 'image' : 'text');
+
   const page = payload.page || null;
-  const postId = makeDocId('post');
+  const postId = payload.postId && /^[a-zA-Z0-9_-]{1,128}$/.test(payload.postId)
+    ? payload.postId
+    : makeDocId('post');
   const postRef = doc(db, 'posts', postId);
   try {
     await setDoc(postRef, {
@@ -561,6 +613,8 @@ export async function createPostPermanent(
       content: cleanContent,
       imageUrl: cleanImage,
       videoUrl: cleanVideo,
+      mediaType: resolvedMediaType,
+      videoThumbnail: cleanThumbnail,
       commentsDisabled: false,
       edited: false,
       pageId: page ? clamp(page.pageId, 128) : '',
@@ -583,6 +637,8 @@ export async function createPostPermanent(
     content: cleanContent,
     image_url: cleanImage || null,
     video_url: cleanVideo || null,
+    media_type: resolvedMediaType,
+    video_thumbnail: cleanThumbnail || null,
     comments_disabled: false,
     edited: false,
     page_id: page ? page.pageId : null,
@@ -616,14 +672,24 @@ export async function updatePostPermanent(
   if (!cleanContent && !cleanImage && !cleanVideo) {
     throw new Error('Post cannot be empty.');
   }
+  const nextMediaType: 'text' | 'image' | 'video' = cleanVideo
+    ? 'video'
+    : cleanImage
+      ? 'image'
+      : 'text';
   try {
-    await updateDoc(doc(db, 'posts', postDocId), {
+    const updatePayload: Record<string, unknown> = {
       content: cleanContent,
       imageUrl: cleanImage,
       videoUrl: cleanVideo,
+      mediaType: nextMediaType,
       edited: true,
       updatedAt: serverTimestamp(),
-    });
+    };
+    if (!cleanVideo) {
+      updatePayload.videoThumbnail = '';
+    }
+    await updateDoc(doc(db, 'posts', postDocId), updatePayload);
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `posts/${postDocId}`);
   }

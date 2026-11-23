@@ -155,6 +155,8 @@
         "content": { "type": "string", "maxLength": 2000 },
         "imageUrl": { "type": "string", "maxLength": 550000 },
         "videoUrl": { "type": "string", "maxLength": 2048 },
+        "mediaType": { "type": "string", "enum": ["text", "image", "video"] },
+        "videoThumbnail": { "type": "string", "maxLength": 550000 },
         "commentsDisabled": { "type": "boolean" },
         "edited": { "type": "boolean" },
         "pageId": { "type": "string", "maxLength": 128 },

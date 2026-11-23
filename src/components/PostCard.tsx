@@ -506,13 +506,19 @@ export function PostCard({
           </div>
         )}
 
-        {/* Photo (only when post is not a video post with thumbnail) */}
-        {post.image_url && !post.video_url && (
+        {/* Photo (only when post is not a video post) */}
+        {post.image_url && post.media_type !== 'video' && !post.video_url && (
           <PostPhoto src={post.image_url} alt={`Photo shared by ${displayName}`} />
         )}
 
-        {/* Video (Facebook-style player with thumbnail poster, Play/Pause, Mute/Unmute, Full-screen) */}
-        {post.video_url && <PostVideo src={post.video_url} poster={post.image_url} />}
+        {/* Video (Facebook-style <video> player with 1s thumbnail, autoplay muted, tap for sound, Tap to retry) */}
+        {(post.media_type === 'video' || Boolean(post.video_url)) && (
+          <PostVideo
+            src={post.video_url || ''}
+            poster={post.video_thumbnail || post.image_url}
+            postId={post.docId}
+          />
+        )}
 
         {/* Engagement stats */}
         <div className="px-4 sm:px-5 py-2.5 flex items-center justify-between text-xs text-[#64748B] dark:text-[#94A3B8]">

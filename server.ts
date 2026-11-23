@@ -763,7 +763,28 @@ cleanupLegacySeededDemoData();
 // Express setup
 const app = express();
 app.use(express.json({limit: '35mb'}));
-app.use('/uploads', express.static(uploadsDir));
+app.use(
+  '/uploads',
+  express.static(uploadsDir, {
+    acceptRanges: true,
+    maxAge: '7d',
+    setHeaders: (res, filePath) => {
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const lower = filePath.toLowerCase();
+      if (lower.endsWith('.mp4') || lower.endsWith('.m4v')) {
+        res.setHeader('Content-Type', 'video/mp4');
+      } else if (lower.endsWith('.webm')) {
+        res.setHeader('Content-Type', 'video/webm');
+      } else if (lower.endsWith('.mov')) {
+        res.setHeader('Content-Type', 'video/quicktime');
+      } else if (lower.endsWith('.ogv') || lower.endsWith('.ogg')) {
+        res.setHeader('Content-Type', 'video/ogg');
+      }
+    },
+  }),
+);
 
 // WebSocket hub
 const server = http.createServer(app);

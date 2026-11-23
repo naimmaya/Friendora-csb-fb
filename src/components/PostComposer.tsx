@@ -12,7 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import {formatFirestoreErrorMessage} from '../lib/firebase';
-import {createPostPermanent} from '../lib/firestoreStore';
+import {createPostPermanent, generatePostDocId} from '../lib/firestoreStore';
 import {
   extractVideoMetadata,
   formatFileSize,
@@ -150,8 +150,11 @@ export function PostComposer({
     setUploadProgress(0);
 
     try {
+      const postId = generatePostDocId();
       let uploadedImageUrl: string | null = null;
       let uploadedVideoUrl: string | null = null;
+      let uploadedVideoThumbnail: string | null = null;
+      let mediaType: 'text' | 'image' | 'video' = 'text';
 
       if (pendingMedia) {
         const ownerKey = postingAsPage
@@ -159,18 +162,40 @@ export function PostComposer({
           : currentUser.uid || 'user';
 
         if (pendingMedia.kind === 'video') {
+          mediaType = 'video';
           setUploadStage('Uploading video...');
           const uploaded = await uploadAttachmentReal(pendingMedia.file, {
-            folder: postingAsPage
-              ? `pages/${postingAsPage.pageId}/post_videos`
-              : `post_videos/${ownerKey}`,
+            folder: `posts/${postId}`,
+            exactStoragePath: `posts/${postId}/video.mp4`,
             kind: 'video',
-            fileName: `${Date.now()}.mp4`,
+            fileName: 'video.mp4',
             onProgress: (pct) => setUploadProgress(pct),
           });
-          uploadedVideoUrl = uploaded.url;
-          uploadedImageUrl = pendingMedia.thumbnailDataUrl || null;
+          if (!uploaded.url || !uploaded.url.trim()) {
+            throw new Error('Video upload did not return a playable URL. Please tap Retry.');
+          }
+          uploadedVideoUrl = uploaded.url.trim();
+          uploadedVideoThumbnail = pendingMedia.thumbnailDataUrl || null;
+          if (uploaded.storageBacked && pendingMedia.thumbnailDataUrl) {
+            try {
+              const thumbResp = await fetch(pendingMedia.thumbnailDataUrl);
+              const thumbBlob = await thumbResp.blob();
+              const uploadedThumb = await uploadAttachmentReal(thumbBlob, {
+                folder: `posts/${postId}`,
+                exactStoragePath: `posts/${postId}/thumbnail.jpg`,
+                kind: 'image',
+                fileName: 'thumbnail.jpg',
+              });
+              if (uploadedThumb.url) {
+                uploadedVideoThumbnail = uploadedThumb.url;
+              }
+            } catch {
+              // Keep compact 1-second JPEG data URL thumbnail
+            }
+          }
+          uploadedImageUrl = null;
         } else {
+          mediaType = 'image';
           setUploadStage('Uploading photo...');
           const uploaded = await uploadAttachmentReal(pendingMedia.file, {
             folder: postingAsPage
@@ -180,15 +205,22 @@ export function PostComposer({
             fileName: `${Date.now()}.jpg`,
             onProgress: (pct) => setUploadProgress(pct),
           });
-          uploadedImageUrl = uploaded.url;
+          if (!uploaded.url || !uploaded.url.trim()) {
+            throw new Error('Photo upload did not complete. Please tap Retry.');
+          }
+          uploadedImageUrl = uploaded.url.trim();
         }
       }
 
+      // Only create Firestore post AFTER media upload finishes and returns a real download URL
       setUploadStage('Saving post...');
       const post = await createPostPermanent(currentUser, {
+        postId,
         content: content.trim(),
         imageUrl: uploadedImageUrl,
         videoUrl: uploadedVideoUrl,
+        videoThumbnail: uploadedVideoThumbnail,
+        mediaType,
         page: postingAsPage,
       });
 
