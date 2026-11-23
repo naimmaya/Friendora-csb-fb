@@ -367,6 +367,7 @@ export type SettingsSection =
 
 export type AppView =
   | 'home'
+  | 'search'
   | 'profile'
   | 'friends'
   | 'messages'

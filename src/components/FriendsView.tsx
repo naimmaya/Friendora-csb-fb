@@ -4,7 +4,6 @@ import {
   Check,
   MessageSquare,
   Phone,
-  Search,
   UserCheck,
   UserMinus,
   UserPlus,
@@ -44,30 +43,14 @@ export function FriendsView({
   const [tab, setTab] = useState<'requests' | 'friends' | 'discover'>(
     network.incomingRequests.length > 0 ? 'requests' : 'discover',
   );
-  const [search, setSearch] = useState('');
   const [busyId, setBusyId] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const followingSet = useMemo(() => new Set(network.followingIds), [network.followingIds]);
   const onlineSet = useMemo(() => new Set(onlineUserIds), [onlineUserIds]);
 
-  const query = search.trim().toLowerCase();
-
-  const filteredFriends = network.friends.filter(
-    (u) =>
-      !query ||
-      u.name.toLowerCase().includes(query) ||
-      u.work.toLowerCase().includes(query) ||
-      u.bio.toLowerCase().includes(query),
-  );
-
-  const filteredSuggestions = network.suggestions.filter(
-    (u) =>
-      !query ||
-      u.name.toLowerCase().includes(query) ||
-      u.work.toLowerCase().includes(query) ||
-      u.bio.toLowerCase().includes(query),
-  );
+  const filteredFriends = network.friends;
+  const filteredSuggestions = network.suggestions;
 
   async function handleRespond(requester: UserProfile, action: 'accept' | 'decline') {
     setBusyId(requester.id);
@@ -135,17 +118,6 @@ export function FriendsView({
               {network.friends.length} friends · {network.incomingRequests.length} incoming requests ·{' '}
               {network.followingIds.length} following
             </p>
-          </div>
-
-          <div className="relative w-full sm:w-64">
-            <Search className="w-4 h-4 text-[#65676B] dark:text-[#9CA3AF] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <input
-              type="search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search people..."
-              className="w-full h-10 pl-9 pr-3 rounded-xl bg-[#F0F2F5] dark:bg-[#121316] text-sm text-[#111827] dark:text-white placeholder:text-[#65676B] dark:placeholder:text-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#1877F2]"
-            />
           </div>
         </div>
 
@@ -321,7 +293,7 @@ export function FriendsView({
           {filteredFriends.length === 0 ? (
             <div className="p-8 text-center">
               <p className="text-sm font-medium text-[#111827] dark:text-white">
-                {search ? 'No friends match your search' : 'No friends added yet'}
+                No friends added yet
               </p>
               <button
                 type="button"

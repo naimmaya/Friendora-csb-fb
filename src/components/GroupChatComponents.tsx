@@ -24,6 +24,7 @@ import {compressImageForFirestore} from '../lib/firestoreStore';
 import {
   addGroupMembersPermanent,
   createGroupPermanent,
+  deleteGroupMessagePermanent,
   deleteGroupPermanent,
   leaveGroupPermanent,
   removeGroupMemberPermanent,
@@ -34,7 +35,8 @@ import {
 } from '../lib/groupService';
 import type {CallType, ChatGroupDoc, GroupChatMessage, UserProfile} from '../types';
 import {ChatInputBar, type OutgoingChatPayload} from './ChatInputBar';
-import {ChatMessageBubble} from './ChatMessageBubble';
+import {ChatMessageBubble, type UnifiedBubbleMessage} from './ChatMessageBubble';
+import {ForwardMediaModal} from './ForwardMediaModal';
 import {Avatar} from './MediaImage';
 
 interface CreateGroupModalProps {
@@ -281,6 +283,7 @@ interface GroupChatWindowProps {
   group: ChatGroupDoc;
   currentUser: UserProfile;
   allUsers: UserProfile[];
+  allGroups?: ChatGroupDoc[];
   onStartGroupCall: (group: ChatGroupDoc, type: CallType) => void;
   onGroupLeftOrDeleted: (groupId: string) => void;
 }
@@ -289,6 +292,7 @@ export function GroupChatWindow({
   group,
   currentUser,
   allUsers,
+  allGroups = [],
   onStartGroupCall,
   onGroupLeftOrDeleted,
 }: GroupChatWindowProps) {
@@ -299,6 +303,8 @@ export function GroupChatWindow({
   const [nameDraft, setNameDraft] = useState(group.name);
   const [busyAction, setBusyAction] = useState(false);
   const [infoError, setInfoError] = useState<string | null>(null);
+  const [forwardingMessage, setForwardingMessage] = useState<UnifiedBubbleMessage | null>(null);
+  const [chatActionError, setChatActionError] = useState<string | null>(null);
 
   const photoInputRef = useRef<HTMLInputElement>(null);
   const scrollEndRef = useRef<HTMLDivElement>(null);
@@ -716,6 +722,21 @@ export function GroupChatWindow({
         <>
           {/* Real-time Messages List */}
           <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-[#F8FAFC] dark:bg-[#101318]">
+            {chatActionError && (
+              <div className="flex items-center justify-between gap-2 rounded-xl bg-[#FEF2F2] dark:bg-[#3B181A] border border-[#FECACA] dark:border-[#7F1D1D] px-3 py-2 text-xs text-[#B91C1C] dark:text-[#FCA5A5]">
+                <span className="flex items-center gap-1.5 min-w-0">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">{chatActionError}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setChatActionError(null)}
+                  className="p-0.5 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
             {messages.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-center px-6">
                 <Avatar src={group.photoUrl} name={group.name} size="lg" />
@@ -732,8 +753,19 @@ export function GroupChatWindow({
                   key={m.id}
                   showSenderIdentity
                   onCallBack={(type) => onStartGroupCall(group, type)}
+                  onDeleteMessage={async (msg) => {
+                    if (!msg.docId) return;
+                    setChatActionError(null);
+                    try {
+                      await deleteGroupMessagePermanent(group.id, msg.docId, msg.mediaUrl);
+                    } catch (err) {
+                      setChatActionError(formatFirestoreErrorMessage(err));
+                    }
+                  }}
+                  onForwardMessage={(msg) => setForwardingMessage(msg)}
                   message={{
                     id: m.id,
+                    docId: m.id,
                     mine: m.senderUid === myUid,
                     senderName: m.senderName,
                     senderAvatar: m.senderAvatar,
@@ -763,6 +795,16 @@ export function GroupChatWindow({
             onSend={handleSendGroupPayload}
           />
         </>
+      )}
+
+      {forwardingMessage && (
+        <ForwardMediaModal
+          message={forwardingMessage}
+          currentUser={currentUser}
+          users={allUsers}
+          groups={allGroups.length > 0 ? allGroups : [group]}
+          onClose={() => setForwardingMessage(null)}
+        />
       )}
     </div>
   );

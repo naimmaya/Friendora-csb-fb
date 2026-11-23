@@ -338,6 +338,32 @@ export function subscribePublicUsers(
   );
 }
 
+export interface PostReactionEntry {
+  userUid: string;
+  userId: number;
+  userName: string;
+  userAvatar: string;
+  reactionType: ReactionType;
+  updatedAt: string;
+}
+
+const VALID_REACTIONS = new Set<ReactionType>([
+  'like',
+  'love',
+  'care',
+  'haha',
+  'wow',
+  'sad',
+  'angry',
+]);
+
+function normalizeReactionType(value: unknown): ReactionType | null {
+  if (typeof value !== 'string') return null;
+  return VALID_REACTIONS.has(value as ReactionType) ? (value as ReactionType) : null;
+}
+
+const reactorProfileCache = new Map<string, {name: string; avatar: string}>();
+
 async function hydratePostEngagement(
   postDocId: string,
   postNumericId: number,
@@ -350,18 +376,31 @@ async function hydratePostEngagement(
   comments: CommentItem[];
   comments_count: number;
 }> {
-  const [reactSnap, commSnap] = await Promise.all([
-    getDocs(query(collection(db, 'posts', postDocId, 'reactions'), where('postId', '==', postDocId))),
+  const [likesSnap, legacyReactSnap, commSnap] = await Promise.all([
+    getDocs(query(collection(db, 'posts', postDocId, 'likes'), where('postId', '==', postDocId))),
+    getDocs(
+      query(collection(db, 'posts', postDocId, 'reactions'), where('postId', '==', postDocId)),
+    ).catch(() => null),
     getDocs(query(collection(db, 'posts', postDocId, 'comments'), where('postId', '==', postDocId))),
   ]);
 
+  const byUser = new Map<string, ReactionType>();
+  if (legacyReactSnap) {
+    for (const d of legacyReactSnap.docs) {
+      const r = normalizeReactionType(d.data()?.reaction);
+      if (r) byUser.set(d.id, r);
+    }
+  }
+  for (const d of likesSnap.docs) {
+    const r = normalizeReactionType(d.data()?.reactionType ?? d.data()?.reaction);
+    if (r) byUser.set(d.id, r);
+  }
+
   const reaction_counts: Partial<Record<ReactionType, number>> = {};
   let my_reaction: ReactionType | null = null;
-  for (const d of reactSnap.docs) {
-    const r = d.data()?.reaction as ReactionType | undefined;
-    if (!r) continue;
+  for (const [uid, r] of byUser.entries()) {
     reaction_counts[r] = (reaction_counts[r] || 0) + 1;
-    if (d.id === currentUid) my_reaction = r;
+    if (uid === currentUid) my_reaction = r;
   }
 
   const comments: CommentItem[] = commSnap.docs
@@ -393,7 +432,7 @@ async function hydratePostEngagement(
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
   return {
-    likes_count: reactSnap.size,
+    likes_count: byUser.size,
     liked_by_me: my_reaction !== null,
     my_reaction,
     reaction_counts,
@@ -740,6 +779,165 @@ export async function reportPostPermanent(params: {
   }
 }
 
+/**
+ * Real-time onSnapshot subscription to a post's reactions (posts/{postId}/likes + legacy reactions).
+ * Powers instant Like/Wow count updates and the Facebook-style "People who reacted" popup.
+ */
+export function subscribePostReactionsPermanent(
+  postDocId: string,
+  currentUid: string,
+  onUpdate: (data: {
+    items: PostReactionEntry[];
+    likes_count: number;
+    liked_by_me: boolean;
+    my_reaction: ReactionType | null;
+    reaction_counts: Partial<Record<ReactionType, number>>;
+  }) => void,
+  onError?: (err: unknown) => void,
+): Unsubscribe {
+  let latestLikes = new Map<string, PostReactionEntry>();
+  let latestLegacy = new Map<string, PostReactionEntry>();
+  let disposed = false;
+
+  async function emitMerged() {
+    if (disposed) return;
+    const merged = new Map<string, PostReactionEntry>();
+    for (const [uid, entry] of latestLegacy.entries()) {
+      merged.set(uid, entry);
+    }
+    for (const [uid, entry] of latestLikes.entries()) {
+      merged.set(uid, entry);
+    }
+
+    // Hydrate any legacy reaction entries that didn't store userName/userAvatar directly
+    const missingUids = Array.from(merged.values())
+      .filter((e) => !e.userName || e.userName === 'Member')
+      .map((e) => e.userUid)
+      .filter((uid) => !reactorProfileCache.has(uid));
+
+    if (missingUids.length > 0) {
+      await Promise.all(
+        missingUids.slice(0, 30).map(async (uid) => {
+          try {
+            const snap = await getDoc(doc(db, 'users', uid));
+            if (snap.exists()) {
+              const d = snap.data();
+              reactorProfileCache.set(uid, {
+                name: String(d.name || 'Member'),
+                avatar: typeof d.avatarUrl === 'string' ? d.avatarUrl : '',
+              });
+            }
+          } catch {
+            // Keep default label
+          }
+        }),
+      );
+    }
+
+    if (disposed) return;
+
+    const reaction_counts: Partial<Record<ReactionType, number>> = {};
+    let my_reaction: ReactionType | null = null;
+    const items: PostReactionEntry[] = [];
+
+    for (const entry of merged.values()) {
+      const cached = reactorProfileCache.get(entry.userUid);
+      const resolved: PostReactionEntry = {
+        ...entry,
+        userName:
+          entry.userName && entry.userName !== 'Member'
+            ? entry.userName
+            : cached?.name || entry.userName || 'Member',
+        userAvatar: entry.userAvatar || cached?.avatar || '',
+      };
+      items.push(resolved);
+      reaction_counts[resolved.reactionType] = (reaction_counts[resolved.reactionType] || 0) + 1;
+      if (resolved.userUid === currentUid) {
+        my_reaction = resolved.reactionType;
+      }
+    }
+
+    items.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+
+    onUpdate({
+      items,
+      likes_count: items.length,
+      liked_by_me: my_reaction !== null,
+      my_reaction,
+      reaction_counts,
+    });
+  }
+
+  const likesQ = query(collection(db, 'posts', postDocId, 'likes'), where('postId', '==', postDocId));
+  const legacyQ = query(
+    collection(db, 'posts', postDocId, 'reactions'),
+    where('postId', '==', postDocId),
+  );
+
+  const unsubLikes = onSnapshot(
+    likesQ,
+    (snap) => {
+      const next = new Map<string, PostReactionEntry>();
+      for (const d of snap.docs) {
+        const data = d.data();
+        const r = normalizeReactionType(data.reactionType ?? data.reaction);
+        if (!r) continue;
+        const uid = String(data.userUid || d.id);
+        const userName = String(data.userName || 'Member');
+        const userAvatar = typeof data.userAvatar === 'string' ? data.userAvatar : '';
+        if (userName && userName !== 'Member') {
+          reactorProfileCache.set(uid, {name: userName, avatar: userAvatar});
+        }
+        next.set(uid, {
+          userUid: uid,
+          userId: uidToNumericId(uid),
+          userName,
+          userAvatar,
+          reactionType: r,
+          updatedAt: tsToIso(data.updatedAt || data.createdAt),
+        });
+      }
+      latestLikes = next;
+      void emitMerged();
+    },
+    (error) => {
+      if (onError) onError(error);
+    },
+  );
+
+  const unsubLegacy = onSnapshot(
+    legacyQ,
+    (snap) => {
+      const next = new Map<string, PostReactionEntry>();
+      for (const d of snap.docs) {
+        const data = d.data();
+        const r = normalizeReactionType(data.reaction);
+        if (!r) continue;
+        const uid = String(data.userUid || d.id);
+        next.set(uid, {
+          userUid: uid,
+          userId: uidToNumericId(uid),
+          userName: 'Member',
+          userAvatar: '',
+          reactionType: r,
+          updatedAt: tsToIso(data.updatedAt || data.createdAt),
+        });
+      }
+      latestLegacy = next;
+      void emitMerged();
+    },
+    () => {
+      // Legacy subcollection optional
+    },
+  );
+
+  return () => {
+    disposed = true;
+    unsubLikes();
+    unsubLegacy();
+  };
+}
+
 export async function toggleReactionPermanent(
   postDocId: string,
   actor: UserProfile,
@@ -752,27 +950,50 @@ export async function toggleReactionPermanent(
   reaction_counts: Partial<Record<ReactionType, number>>;
 }> {
   if (!actor.uid) throw new Error('Not authenticated.');
-  const reactPath = `posts/${postDocId}/reactions/${actor.uid}`;
-  const reactRef = doc(db, 'posts', postDocId, 'reactions', actor.uid);
+  const likePath = `posts/${postDocId}/likes/${actor.uid}`;
+  const likeRef = doc(db, 'posts', postDocId, 'likes', actor.uid);
+  const legacyRef = doc(db, 'posts', postDocId, 'reactions', actor.uid);
+  const safeName = clamp(actor.name, 60) || 'Member';
+  const safeAvatar = clamp(actor.avatar_url, 450000);
 
   try {
-    const existing = await getDoc(reactRef);
-    if (existing.exists() && existing.data()?.reaction === reaction) {
-      await deleteDoc(reactRef);
-    } else if (existing.exists()) {
-      await updateDoc(reactRef, {
-        reaction,
+    const [existingLike, existingLegacy] = await Promise.all([
+      getDoc(likeRef),
+      getDoc(legacyRef).catch(() => null),
+    ]);
+
+    const currentType = existingLike.exists()
+      ? normalizeReactionType(existingLike.data()?.reactionType ?? existingLike.data()?.reaction)
+      : existingLegacy?.exists()
+        ? normalizeReactionType(existingLegacy.data()?.reaction)
+        : null;
+
+    if (currentType === reaction) {
+      // Toggle off: remove reaction cleanly from likes (and legacy reactions if present)
+      if (existingLike.exists()) await deleteDoc(likeRef);
+      if (existingLegacy?.exists()) await deleteDoc(legacyRef).catch(() => {});
+    } else if (existingLike.exists()) {
+      // Switch reaction type in place (e.g. Like -> Wow)
+      await updateDoc(likeRef, {
+        reactionType: reaction,
+        userName: safeName,
+        userAvatar: safeAvatar,
         updatedAt: serverTimestamp(),
       });
+      if (existingLegacy?.exists()) await deleteDoc(legacyRef).catch(() => {});
     } else {
-      await setDoc(reactRef, {
+      // Create new reaction at posts/{postId}/likes/{userId}
+      await setDoc(likeRef, {
         postId: postDocId,
         userUid: actor.uid,
-        reaction,
+        userName: safeName,
+        userAvatar: safeAvatar,
+        reactionType: reaction,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
-      if (postAuthorUid && postAuthorUid !== actor.uid) {
+      if (existingLegacy?.exists()) await deleteDoc(legacyRef).catch(() => {});
+      if (!existingLegacy?.exists() && postAuthorUid && postAuthorUid !== actor.uid) {
         createNotificationPermanent({
           recipientUid: postAuthorUid,
           actor,
@@ -782,25 +1003,39 @@ export async function toggleReactionPermanent(
       }
     }
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, reactPath);
+    handleFirestoreError(error, OperationType.WRITE, likePath);
   }
 
-  const all = await getDocs(
-    query(collection(db, 'posts', postDocId, 'reactions'), where('postId', '==', postDocId)),
-  );
+  const [likesSnap, legacySnap] = await Promise.all([
+    getDocs(query(collection(db, 'posts', postDocId, 'likes'), where('postId', '==', postDocId))),
+    getDocs(
+      query(collection(db, 'posts', postDocId, 'reactions'), where('postId', '==', postDocId)),
+    ).catch(() => null),
+  ]);
+
+  const byUser = new Map<string, ReactionType>();
+  if (legacySnap) {
+    for (const d of legacySnap.docs) {
+      const r = normalizeReactionType(d.data()?.reaction);
+      if (r) byUser.set(d.id, r);
+    }
+  }
+  for (const d of likesSnap.docs) {
+    const r = normalizeReactionType(d.data()?.reactionType ?? d.data()?.reaction);
+    if (r) byUser.set(d.id, r);
+  }
+
   const reaction_counts: Partial<Record<ReactionType, number>> = {};
   let my_reaction: ReactionType | null = null;
-  for (const d of all.docs) {
-    const r = d.data()?.reaction as ReactionType | undefined;
-    if (!r) continue;
+  for (const [uid, r] of byUser.entries()) {
     reaction_counts[r] = (reaction_counts[r] || 0) + 1;
-    if (d.id === actor.uid) my_reaction = r;
+    if (uid === actor.uid) my_reaction = r;
   }
 
   return {
     liked: my_reaction !== null,
     my_reaction,
-    likes_count: all.size,
+    likes_count: byUser.size,
     reaction_counts,
   };
 }
@@ -1323,6 +1558,21 @@ export async function sendMessagePermanent(
     read: false,
     created_at: new Date().toISOString(),
   };
+}
+
+export async function deleteMessagePermanent(
+  messageDocId: string,
+  mediaUrl?: string | null,
+): Promise<void> {
+  if (!messageDocId) return;
+  try {
+    await deleteDoc(doc(db, 'messages', messageDocId));
+    if (mediaUrl) {
+      await deleteFirebaseStorageUrlIfApplicable(mediaUrl);
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `messages/${messageDocId}`);
+  }
 }
 
 /**

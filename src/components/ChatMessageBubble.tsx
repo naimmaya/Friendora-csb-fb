@@ -5,12 +5,15 @@ import {
   Download,
   ExternalLink,
   FileText,
+  Forward,
   Image as ImageIcon,
+  Loader2,
   MapPin,
   Pause,
   Phone,
   PhoneMissed,
   Play,
+  Trash2,
   Video,
   X,
 } from 'lucide-react';
@@ -21,6 +24,7 @@ import {Avatar, useResolvedMediaUrl} from './MediaImage';
 
 export interface UnifiedBubbleMessage {
   id: string | number;
+  docId?: string;
   mine: boolean;
   senderName?: string;
   senderAvatar?: string;
@@ -44,6 +48,8 @@ interface ChatMessageBubbleProps {
   message: UnifiedBubbleMessage;
   showSenderIdentity?: boolean;
   onCallBack?: (type: 'audio' | 'video') => void;
+  onDeleteMessage?: (message: UnifiedBubbleMessage) => Promise<void> | void;
+  onForwardMessage?: (message: UnifiedBubbleMessage) => void;
 }
 
 // Global voice playback coordinator: playing one voice message automatically pauses any other!
@@ -148,16 +154,13 @@ function VoiceMessagePlayer({
         onError={() => setLoadFailed(true)}
       />
 
-      {/* Play / Pause Button */}
       <button
         type="button"
         disabled={loadFailed}
         onClick={() => void togglePlay()}
         aria-label={isPlaying ? 'Pause voice message' : 'Play voice message'}
         className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 transition-transform active:scale-95 cursor-pointer ${
-          mine
-            ? 'bg-white text-[#1877F2]'
-            : 'bg-[#1877F2] text-white'
+          mine ? 'bg-white text-[#1877F2]' : 'bg-[#1877F2] text-white'
         }`}
       >
         {isPlaying ? (
@@ -167,7 +170,6 @@ function VoiceMessagePlayer({
         )}
       </button>
 
-      {/* Interactive Waveform */}
       <div className="flex-1 flex items-center gap-[2.5px] h-7 cursor-pointer">
         {VOICE_BAR_HEIGHTS.map((h, idx) => {
           const barFraction = (idx + 1) / VOICE_BAR_HEIGHTS.length;
@@ -197,7 +199,6 @@ function VoiceMessagePlayer({
         })}
       </div>
 
-      {/* Duration */}
       <span
         className={`text-[11px] font-semibold tabular-nums shrink-0 ${
           mine ? 'text-white/95' : 'text-[#475569] dark:text-[#CBD5E1]'
@@ -213,17 +214,63 @@ export function ChatMessageBubble({
   message,
   showSenderIdentity = false,
   onCallBack,
+  onDeleteMessage,
+  onForwardMessage,
 }: ChatMessageBubbleProps) {
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [photoMenuOpen, setPhotoMenuOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [imgFailed, setImgFailed] = useState(false);
   const resolvedMedia = useResolvedMediaUrl(message.mediaUrl || null);
+
+  // Long-press state for Facebook Messenger-style photo actions (Download, Forward, Delete)
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressTriggeredRef = useRef(false);
 
   useEffect(() => {
     setImgFailed(false);
   }, [resolvedMedia]);
 
+  useEffect(() => {
+    return () => {
+      if (longPressTimerRef.current) window.clearTimeout(longPressTimerRef.current);
+    };
+  }, []);
+
+  function startPhotoLongPress() {
+    longPressTriggeredRef.current = false;
+    if (longPressTimerRef.current) window.clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTriggeredRef.current = true;
+      setPhotoMenuOpen(true);
+      if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+        try {
+          navigator.vibrate(25);
+        } catch {
+          // Ignore
+        }
+      }
+    }, 480);
+  }
+
+  function cancelPhotoLongPress() {
+    if (longPressTimerRef.current) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }
+
+  function handlePhotoTap() {
+    if (longPressTriggeredRef.current) {
+      longPressTriggeredRef.current = false;
+      return;
+    }
+    setLightboxOpen(true);
+  }
+
   async function handleDownloadPhoto() {
     if (!resolvedMedia) return;
+    setPhotoMenuOpen(false);
     try {
       const response = await fetch(resolvedMedia);
       const blob = await response.blob();
@@ -244,6 +291,18 @@ export function ChatMessageBubble({
       document.body.appendChild(a);
       a.click();
       a.remove();
+    }
+  }
+
+  async function handleDeletePhoto() {
+    if (!onDeleteMessage || deleting) return;
+    setDeleting(true);
+    try {
+      await onDeleteMessage(message);
+      setPhotoMenuOpen(false);
+      setLightboxOpen(false);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -325,55 +384,70 @@ export function ChatMessageBubble({
           </div>
         )}
 
-        <div className={`flex flex-col max-w-[82%] ${message.mine ? 'items-end' : 'items-start'}`}>
+        <div className={`flex flex-col max-w-[85%] ${message.mine ? 'items-end' : 'items-start'}`}>
           {showSenderIdentity && !message.mine && message.senderName && (
             <span className="text-[11px] font-semibold text-[#64748B] dark:text-[#94A3B8] px-1 mb-0.5">
               {message.senderName}
             </span>
           )}
 
-          {/* IMAGE */}
+          {/* IMAGE — Facebook Messenger Large Size (240px–280px width, height auto, 18px rounded corners, tap fullscreen, long-press menu) */}
           {message.messageType === 'image' && (
-            <div className="rounded-2xl overflow-hidden border border-[#E5E8EE] dark:border-[#252A34] bg-[#0F1115] max-w-[260px]">
+            <div
+              onPointerDown={startPhotoLongPress}
+              onPointerUp={cancelPhotoLongPress}
+              onPointerLeave={cancelPhotoLongPress}
+              onPointerCancel={cancelPhotoLongPress}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                cancelPhotoLongPress();
+                setPhotoMenuOpen(true);
+              }}
+              className="rounded-[18px] overflow-hidden border border-[#E5E8EE] dark:border-[#252A34] bg-[#0F1115] w-[252px] sm:w-[276px] max-w-full shadow-xs select-none"
+            >
               {resolvedMedia && !imgFailed ? (
                 <button
                   type="button"
-                  onClick={() => setLightboxOpen(true)}
-                  className="block cursor-pointer w-full"
+                  onClick={handlePhotoTap}
+                  aria-label="Tap to view photo full-screen, hold for options"
+                  className="block w-full cursor-pointer"
                 >
                   <img
                     src={resolvedMedia}
                     alt={message.mediaName || 'Shared photo'}
                     referrerPolicy="no-referrer"
+                    draggable={false}
                     onError={() => setImgFailed(true)}
-                    className="w-full max-h-64 object-cover block"
+                    className="w-full h-auto max-h-[380px] object-cover block"
                   />
                 </button>
               ) : (
-                <div className="w-52 h-36 bg-[#1E222B] flex flex-col items-center justify-center gap-1.5 text-[#94A3B8] text-xs px-3 text-center">
-                  <ImageIcon className="w-5 h-5" />
+                <div className="w-full h-44 bg-[#1E222B] flex flex-col items-center justify-center gap-1.5 text-[#94A3B8] text-xs px-3 text-center">
+                  <ImageIcon className="w-6 h-6" />
                   <span>{imgFailed ? 'Photo unavailable' : 'Loading photo...'}</span>
                 </div>
               )}
               {message.content && (
-                <p className={`px-3 py-2 text-xs ${bubbleClasses}`}>{message.content}</p>
+                <p className={`px-3.5 py-2 text-xs leading-relaxed ${bubbleClasses}`}>
+                  {message.content}
+                </p>
               )}
             </div>
           )}
 
           {/* VIDEO */}
           {message.messageType === 'video' && (
-            <div className="rounded-2xl overflow-hidden border border-[#E5E8EE] dark:border-[#252A34] bg-black max-w-[280px]">
+            <div className="rounded-[18px] overflow-hidden border border-[#E5E8EE] dark:border-[#252A34] bg-black w-[260px] sm:w-[280px] max-w-full">
               {resolvedMedia ? (
                 <video
                   src={resolvedMedia}
                   controls
                   playsInline
                   preload="metadata"
-                  className="w-full max-h-64 block"
+                  className="w-full h-auto max-h-72 block"
                 />
               ) : (
-                <div className="w-60 h-40 animate-pulse bg-[#1E222B]" />
+                <div className="w-full h-44 animate-pulse bg-[#1E222B]" />
               )}
               {message.content && (
                 <p className={`px-3 py-2 text-xs ${bubbleClasses}`}>{message.content}</p>
@@ -504,7 +578,77 @@ export function ChatMessageBubble({
         </div>
       </div>
 
-      {/* Fullscreen Image Lightbox with Download & Close */}
+      {/* Long-Press Photo Action Sheet: Download, Forward, Delete */}
+      {photoMenuOpen && message.messageType === 'image' && (
+        <div
+          onClick={() => setPhotoMenuOpen(false)}
+          className="fixed inset-0 z-[135] bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-3 sm:p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl shadow-2xl overflow-hidden"
+          >
+            <div className="px-4 py-3 border-b border-[#E5E8EE] dark:border-[#252A34] flex items-center justify-between">
+              <span className="font-display font-bold text-sm text-[#0F172A] dark:text-white">
+                Photo Options
+              </span>
+              <button
+                type="button"
+                onClick={() => setPhotoMenuOpen(false)}
+                aria-label="Close photo menu"
+                className="w-7 h-7 rounded-full hover:bg-[#F4F6F9] dark:hover:bg-[#232732] text-[#64748B] flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-2 space-y-1">
+              {resolvedMedia && (
+                <button
+                  type="button"
+                  onClick={() => void handleDownloadPhoto()}
+                  className="w-full px-3.5 py-3 rounded-xl hover:bg-[#F4F6F9] dark:hover:bg-[#232732] flex items-center gap-3 text-sm font-medium text-[#0F172A] dark:text-white cursor-pointer"
+                >
+                  <Download className="w-4 h-4 text-[#1877F2] dark:text-[#60A5FA]" />
+                  <span>Download Photo</span>
+                </button>
+              )}
+
+              {onForwardMessage && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPhotoMenuOpen(false);
+                    onForwardMessage(message);
+                  }}
+                  className="w-full px-3.5 py-3 rounded-xl hover:bg-[#F4F6F9] dark:hover:bg-[#232732] flex items-center gap-3 text-sm font-medium text-[#0F172A] dark:text-white cursor-pointer"
+                >
+                  <Forward className="w-4 h-4 text-[#1877F2] dark:text-[#60A5FA]" />
+                  <span>Forward</span>
+                </button>
+              )}
+
+              {message.mine && onDeleteMessage && (
+                <button
+                  type="button"
+                  disabled={deleting}
+                  onClick={() => void handleDeletePhoto()}
+                  className="w-full px-3.5 py-3 rounded-xl hover:bg-[#FEF2F2] dark:hover:bg-[#3B181A]/60 flex items-center gap-3 text-sm font-medium text-[#DC2626] dark:text-[#F87171] disabled:opacity-50 cursor-pointer"
+                >
+                  {deleting ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="w-4 h-4" />
+                  )}
+                  <span>{deleting ? 'Deleting...' : 'Delete'}</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Fullscreen Image Lightbox with Download, Forward, Delete & Close */}
       {lightboxOpen && resolvedMedia && (
         <div
           onClick={() => setLightboxOpen(false)}
@@ -521,8 +665,41 @@ export function ChatMessageBubble({
               className="h-10 px-3.5 rounded-full bg-white/15 hover:bg-white/25 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
             >
               <Download className="w-4 h-4" />
-              <span>Download</span>
+              <span className="hidden sm:inline">Download</span>
             </button>
+
+            {onForwardMessage && (
+              <button
+                type="button"
+                onClick={() => {
+                  setLightboxOpen(false);
+                  onForwardMessage(message);
+                }}
+                aria-label="Forward photo"
+                className="h-10 px-3.5 rounded-full bg-white/15 hover:bg-white/25 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Forward className="w-4 h-4" />
+                <span className="hidden sm:inline">Forward</span>
+              </button>
+            )}
+
+            {message.mine && onDeleteMessage && (
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={() => void handleDeletePhoto()}
+                aria-label="Delete photo"
+                className="h-10 px-3.5 rounded-full bg-red-600/85 hover:bg-red-600 text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+              >
+                {deleting ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Trash2 className="w-4 h-4" />
+                )}
+                <span className="hidden sm:inline">Delete</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => setLightboxOpen(false)}

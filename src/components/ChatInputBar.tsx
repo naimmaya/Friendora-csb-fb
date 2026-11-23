@@ -3,6 +3,7 @@ import type {ChangeEvent, FormEvent, PointerEvent as ReactPointerEvent} from 're
 import {
   AlertCircle,
   Camera,
+  ExternalLink,
   FileText,
   Image as ImageIcon,
   Loader2,
@@ -14,6 +15,7 @@ import {
   RefreshCw,
   RotateCcw,
   Send,
+  Settings,
   Smile,
   Trash2,
   Video,
@@ -112,10 +114,17 @@ export function ChatInputBar({
   const [uploadingLabel, setUploadingLabel] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
-  const [micPermissionDenied, setMicPermissionDenied] = useState(false);
   const [retryableUpload, setRetryableUpload] = useState<RetryableUpload | null>(null);
 
-  // Staged preview right above the chat bar (for Camera photo, Gallery photo, Video, or Document)
+  // Real Microphone Permission State (synced with Browser Permissions API)
+  const [micPermission, setMicPermission] = useState<'granted' | 'prompt' | 'denied' | 'unknown'>(
+    'unknown',
+  );
+  const [showMicBanner, setShowMicBanner] = useState(false);
+  const [showMicSettingsModal, setShowMicSettingsModal] = useState(false);
+  const [requestingMic, setRequestingMic] = useState(false);
+
+  // Staged preview right above the chat bar (Camera / Gallery Photo / Video / Document)
   const [stagedMedia, setStagedMedia] = useState<StagedMedia | null>(null);
 
   // Popovers
@@ -145,6 +154,7 @@ export function ChatInputBar({
   const recordLockedRef = useRef(false);
   const recordStartMsRef = useRef(0);
   const holdReleasePendingRef = useRef(false);
+  const pointerStartedRecordingRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const waveformRafRef = useRef<number | null>(null);
 
@@ -163,12 +173,50 @@ export function ChatInputBar({
     ) || 'general';
 
   const hasTextOrMedia = draft.trim().length > 0 || stagedMedia !== null;
+  const isInsideIframe = typeof window !== 'undefined' && window.self !== window.top;
 
   function getFolderForKind(kind: 'image' | 'video' | 'voice' | 'document'): string {
     if (kind === 'image') return `chat_images/${resolvedChatKey}`;
     if (kind === 'voice') return `chat_voices/${resolvedChatKey}`;
     return `chat_media/${resolvedChatKey}`;
   }
+
+  // Subscribe to real browser microphone permission state (never shows red bar on mount!)
+  useEffect(() => {
+    let active = true;
+    let permStatus: PermissionStatus | null = null;
+
+    if (navigator.permissions?.query) {
+      navigator.permissions
+        .query({name: 'microphone' as PermissionName})
+        .then((status) => {
+          if (!active) return;
+          permStatus = status;
+          setMicPermission(status.state);
+          if (status.state === 'granted') {
+            setShowMicBanner(false);
+            setShowMicSettingsModal(false);
+          }
+          status.onchange = () => {
+            if (!active) return;
+            setMicPermission(status.state);
+            if (status.state === 'granted') {
+              setShowMicBanner(false);
+              setShowMicSettingsModal(false);
+              setError(null);
+            }
+          };
+        })
+        .catch(() => {
+          // Permissions API not supported for microphone on some mobile browsers
+        });
+    }
+
+    return () => {
+      active = false;
+      if (permStatus) permStatus.onchange = null;
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -208,7 +256,9 @@ export function ChatInputBar({
   function startWaveformAnalyzer(stream: MediaStream) {
     stopWaveformAnalyzer();
     try {
-      const AudioCtx = window.AudioContext || (window as unknown as {webkitAudioContext: typeof AudioContext}).webkitAudioContext;
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as {webkitAudioContext: typeof AudioContext}).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
       audioContextRef.current = ctx;
@@ -226,7 +276,6 @@ export function ChatInputBar({
           const bars: number[] = [];
           for (let i = 0; i < 16; i += 1) {
             const val = dataArray[i] || 0;
-            // Ensure subtle lively bar motion even in quiet rooms
             const pct = Math.max(18, Math.min(100, Math.round((val / 255) * 100) + 14));
             bars.push(pct);
           }
@@ -236,7 +285,7 @@ export function ChatInputBar({
       };
       waveformRafRef.current = window.requestAnimationFrame(tick);
     } catch {
-      // Fallback animation still renders cleanly
+      // Fallback waveform bars still animate cleanly
     }
   }
 
@@ -328,7 +377,7 @@ export function ChatInputBar({
   async function executeMediaUploadAndSend(job: RetryableUpload) {
     setSending(true);
     setError(null);
-    setMicPermissionDenied(false);
+    setShowMicBanner(false);
     setRetryableUpload(null);
     setUploadProgress(2);
     setUploadingLabel(
@@ -394,7 +443,6 @@ export function ChatInputBar({
     setShowEmoji(false);
     setShowAttach(false);
 
-    // 1. If a photo/video/document is staged in preview tray -> upload and send it now
     if (stagedMedia) {
       await executeMediaUploadAndSend({
         kind: stagedMedia.kind,
@@ -405,7 +453,6 @@ export function ChatInputBar({
       return;
     }
 
-    // 2. Plain text message
     const trimmed = draft.trim();
     if (!trimmed) return;
     setSending(true);
@@ -432,7 +479,7 @@ export function ChatInputBar({
     setShowEmoji(false);
     setError(null);
     setRetryableUpload(null);
-    setMicPermissionDenied(false);
+    setShowMicBanner(false);
 
     if (kind === 'image') {
       const previewUrl = URL.createObjectURL(file);
@@ -457,7 +504,6 @@ export function ChatInputBar({
       return;
     }
 
-    // Document: stage preview so user confirms and taps Send
     setStagedMedia({kind: 'document', file, previewUrl: null});
   }
 
@@ -502,107 +548,139 @@ export function ChatInputBar({
     }
   }
 
-  // VOICE RECORDING: Hold-to-record OR Tap-to-record + Lock hands-free like Facebook Messenger
-  async function startVoiceRecording(startLocked: boolean) {
-    if (isRecording || sending) return;
+  // REAL MICROPHONE PERMISSION + VOICE RECORDING (Facebook Messenger style)
+  async function beginVoiceRecordingWithStream(stream: MediaStream, startLocked: boolean) {
+    // Prefer WebM Opus (chat_voices/{chatId}/{time}.webm) like requested, falling back cleanly on Safari/iOS
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : MediaRecorder.isTypeSupported('audio/mp4')
+          ? 'audio/mp4'
+          : '';
+
+    const recorder = mimeType
+      ? new MediaRecorder(stream, {mimeType, audioBitsPerSecond: 48000})
+      : new MediaRecorder(stream);
+
+    audioChunksRef.current = [];
+    cancelRecordingRef.current = false;
+    recordSecondsRef.current = 0;
+    recordLockedRef.current = startLocked;
+    recordStartMsRef.current = Date.now();
+    setRecordSeconds(0);
+    setIsRecordLocked(startLocked);
+    setWaveformLevels(DEFAULT_WAVEFORM);
+
+    recorder.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size > 0) {
+        audioChunksRef.current.push(ev.data);
+      }
+    };
+
+    recorder.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      stopWaveformAnalyzer();
+      if (recordTimerRef.current) {
+        window.clearInterval(recordTimerRef.current);
+        recordTimerRef.current = null;
+      }
+      setIsRecording(false);
+      setIsRecordLocked(false);
+      recordLockedRef.current = false;
+
+      if (cancelRecordingRef.current || audioChunksRef.current.length === 0) {
+        return;
+      }
+
+      const elapsedMs = Date.now() - recordStartMsRef.current;
+      const durationSec = Math.max(1, Math.round(elapsedMs / 1000) || recordSecondsRef.current);
+      const type = recorder.mimeType || 'audio/webm';
+      const ext = type.includes('webm') ? 'webm' : type.includes('mp4') ? 'm4a' : 'webm';
+      const blob = new Blob(audioChunksRef.current, {type});
+
+      await executeMediaUploadAndSend({
+        kind: 'voice',
+        blob,
+        fileName: `${Date.now()}.${ext}`,
+        caption: '',
+        voiceDurationSec: durationSec,
+      });
+    };
+
+    mediaRecorderRef.current = recorder;
+    recorder.start(200);
+    setIsRecording(true);
+    startWaveformAnalyzer(stream);
+
+    recordTimerRef.current = window.setInterval(() => {
+      recordSecondsRef.current += 1;
+      setRecordSeconds(recordSecondsRef.current);
+      if (recordSecondsRef.current >= 120) {
+        recorder.stop();
+      }
+    }, 1000);
+
+    if (holdReleasePendingRef.current) {
+      holdReleasePendingRef.current = false;
+      recordLockedRef.current = true;
+      setIsRecordLocked(true);
+    }
+  }
+
+  async function requestMicAndRecord(startLocked: boolean, fromAllowButton = false) {
+    if (isRecording || sending || requestingMic) return;
     setError(null);
     setRetryableUpload(null);
-    setMicPermissionDenied(false);
     setShowAttach(false);
     setShowEmoji(false);
 
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-      setError('Voice recording is not supported on this browser.');
+      setError('Voice recording is not supported in this browser.');
       return;
     }
 
+    setRequestingMic(true);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      });
+      // Real browser / Android OS microphone permission request
+      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
 
-      const mimeType = MediaRecorder.isTypeSupported('audio/mp4')
-        ? 'audio/mp4'
-        : MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-          ? 'audio/webm;codecs=opus'
-          : MediaRecorder.isTypeSupported('audio/webm')
-            ? 'audio/webm'
-            : '';
+      // Immediately clear red bar & settings modal, flip mic icon from blue to white, and start recording!
+      setMicPermission('granted');
+      setShowMicBanner(false);
+      setShowMicSettingsModal(false);
+      setRequestingMic(false);
 
-      const recorder = mimeType
-        ? new MediaRecorder(stream, {mimeType, audioBitsPerSecond: 48000})
-        : new MediaRecorder(stream);
-
-      audioChunksRef.current = [];
-      cancelRecordingRef.current = false;
-      recordSecondsRef.current = 0;
-      recordLockedRef.current = startLocked;
-      recordStartMsRef.current = Date.now();
-      setRecordSeconds(0);
-      setIsRecordLocked(startLocked);
-      setWaveformLevels(DEFAULT_WAVEFORM);
-
-      recorder.ondataavailable = (ev) => {
-        if (ev.data && ev.data.size > 0) {
-          audioChunksRef.current.push(ev.data);
-        }
-      };
-
-      recorder.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        stopWaveformAnalyzer();
-        if (recordTimerRef.current) {
-          window.clearInterval(recordTimerRef.current);
-          recordTimerRef.current = null;
-        }
-        setIsRecording(false);
-        setIsRecordLocked(false);
-        recordLockedRef.current = false;
-
-        if (cancelRecordingRef.current || audioChunksRef.current.length === 0) {
-          return;
-        }
-
-        const elapsedMs = Date.now() - recordStartMsRef.current;
-        const durationSec = Math.max(1, Math.round(elapsedMs / 1000) || recordSecondsRef.current);
-        const type = recorder.mimeType || 'audio/webm';
-        const ext = type.includes('mp4') ? 'm4a' : 'webm';
-        const blob = new Blob(audioChunksRef.current, {type});
-
-        await executeMediaUploadAndSend({
-          kind: 'voice',
-          blob,
-          fileName: `${Date.now()}.${ext}`,
-          caption: '',
-          voiceDurationSec: durationSec,
-        });
-      };
-
-      mediaRecorderRef.current = recorder;
-      recorder.start(200);
-      setIsRecording(true);
-      startWaveformAnalyzer(stream);
-
-      recordTimerRef.current = window.setInterval(() => {
-        recordSecondsRef.current += 1;
-        setRecordSeconds(recordSecondsRef.current);
-        if (recordSecondsRef.current >= 120) {
-          recorder.stop();
-        }
-      }, 1000);
-
-      // If user already released pointer during permission prompt -> switch to locked hands-free mode
-      if (holdReleasePendingRef.current) {
-        holdReleasePendingRef.current = false;
-        recordLockedRef.current = true;
-        setIsRecordLocked(true);
+      await beginVoiceRecordingWithStream(stream, startLocked);
+    } catch (err) {
+      setRequestingMic(false);
+      const name = err instanceof DOMException ? err.name : '';
+      if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+        setError('No microphone was found on this device.');
+        return;
       }
-    } catch {
-      setMicPermissionDenied(true);
-      setError('Allow Mic Permission to record voice messages.');
+
+      // Check whether the browser already has microphone permanently blocked ('denied')
+      let stateNow: PermissionState | 'unknown' = micPermission === 'denied' ? 'denied' : 'unknown';
+      if (navigator.permissions?.query) {
+        try {
+          const st = await navigator.permissions.query({name: 'microphone' as PermissionName});
+          stateNow = st.state;
+          setMicPermission(st.state);
+        } catch {
+          // Ignore
+        }
+      }
+
+      if (fromAllowButton || stateNow === 'denied') {
+        // User previously denied or clicked "Allow Mic" while blocked -> open exact Settings guide modal!
+        setMicPermission('denied');
+        setShowMicBanner(false);
+        setShowMicSettingsModal(true);
+      } else {
+        // First time declined on prompt -> show gentle single banner with real Allow Mic button
+        setShowMicBanner(true);
+      }
     }
   }
 
@@ -617,28 +695,61 @@ export function ChatInputBar({
     }
   }
 
+  // If mic permission is already granted: support smooth Hold-to-record + release-to-send AND quick-tap hands-free!
+  // If NOT granted yet: let standard onClick trigger real getUserMedia({audio:true}) without preventDefault blocking Android's system popup!
   function handleMicPointerDown(e: ReactPointerEvent<HTMLButtonElement>) {
-    e.preventDefault();
-    if (sending || isRecording) return;
-    holdReleasePendingRef.current = false;
-    void startVoiceRecording(false);
+    if (sending || isRecording || requestingMic) return;
+    if (micPermission === 'granted') {
+      e.preventDefault();
+      pointerStartedRecordingRef.current = true;
+      holdReleasePendingRef.current = false;
+      void requestMicAndRecord(false, false);
+    } else {
+      pointerStartedRecordingRef.current = false;
+    }
   }
 
   function handleMicPointerUp() {
+    if (!pointerStartedRecordingRef.current) return;
     if (!isRecording) {
-      // User tapped quickly before getUserMedia resolved -> keep recording locked hands-free!
       holdReleasePendingRef.current = true;
       return;
     }
     if (recordLockedRef.current) return;
     const heldMs = Date.now() - recordStartMsRef.current;
-    // Quick tap (< 450ms) locks hands-free recording; long hold (>= 450ms) sends immediately on release!
     if (heldMs < 450) {
       recordLockedRef.current = true;
       setIsRecordLocked(true);
     } else {
       stopVoiceRecording(false);
     }
+  }
+
+  function handleMicClick() {
+    if (pointerStartedRecordingRef.current) {
+      pointerStartedRecordingRef.current = false;
+      return;
+    }
+    if (sending || isRecording || requestingMic) return;
+    // Direct user-gesture click triggers real system permission popup cleanly on Android Chrome & Desktop
+    void requestMicAndRecord(true, micPermission === 'denied');
+  }
+
+  function handleOpenBrowserSettings() {
+    // Open standalone app URL in a top-level tab if inside iframe (so Chrome shows the address bar Lock/Site Settings icon),
+    // otherwise reload after guiding user to Site Settings.
+    if (isInsideIframe) {
+      const a = document.createElement('a');
+      a.href = window.location.href;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      return;
+    }
+    // Attempt Chrome/Android site settings deep link if supported; fallback keeps instructions visible cleanly
+    void requestMicAndRecord(true, true);
   }
 
   return (
@@ -695,7 +806,43 @@ export function ChatInputBar({
         </div>
       )}
 
-      {/* Error Alert with real Retry / Allow Mic Permission button */}
+      {/* Mic Permission Prompt Bar (only shown right after user taps Mic and declines — vanishes immediately once allowed) */}
+      {showMicBanner && micPermission !== 'granted' && (
+        <div
+          role="alert"
+          className="px-3.5 py-2 bg-[#FEF2F2] dark:bg-[#3B181A] border-b border-[#FECACA] dark:border-[#7F1D1D] flex items-center justify-between gap-2 text-xs font-medium text-[#B91C1C] dark:text-[#FCA5A5]"
+        >
+          <span className="flex items-center gap-1.5 min-w-0">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Microphone access needed to record voice.</span>
+          </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              disabled={requestingMic}
+              onClick={() => void requestMicAndRecord(true, true)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#1877F2] hover:bg-[#166FE5] text-white text-[11px] font-semibold cursor-pointer"
+            >
+              {requestingMic ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <Mic className="w-3 h-3" />
+              )}
+              <span>Allow Mic</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowMicBanner(false)}
+              aria-label="Dismiss microphone notice"
+              className="p-0.5 hover:bg-black/10 rounded cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* General Upload Error Alert with real Retry button */}
       {error && (
         <div
           role="alert"
@@ -716,22 +863,11 @@ export function ChatInputBar({
                 <span>Retry</span>
               </button>
             )}
-            {micPermissionDenied && !sending && (
-              <button
-                type="button"
-                onClick={() => void startVoiceRecording(true)}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#1877F2] hover:bg-[#166FE5] text-white text-[11px] font-semibold cursor-pointer"
-              >
-                <Mic className="w-3 h-3" />
-                <span>Allow Mic</span>
-              </button>
-            )}
             <button
               type="button"
               onClick={() => {
                 setError(null);
                 setRetryableUpload(null);
-                setMicPermissionDenied(false);
               }}
               aria-label="Dismiss error"
               className="p-0.5 hover:bg-black/10 rounded cursor-pointer"
@@ -742,7 +878,7 @@ export function ChatInputBar({
         </div>
       )}
 
-      {/* Messenger-style Small Preview Tray BEFORE Sending (Camera / Gallery Photo / Video / Document) */}
+      {/* Messenger-style Photo / Video / Document Preview Tray BEFORE Sending */}
       {stagedMedia && !isRecording && (
         <div className="px-3 py-2.5 border-b border-[#E5E8EE] dark:border-[#252A34] bg-[#F8FAFC] dark:bg-[#11141B] flex items-center gap-3">
           <div className="relative shrink-0">
@@ -750,10 +886,10 @@ export function ChatInputBar({
               <img
                 src={stagedMedia.previewUrl}
                 alt="Photo ready to send"
-                className="w-16 h-16 rounded-xl object-cover border border-[#E5E8EE] dark:border-[#252A34] bg-black"
+                className="w-24 h-24 rounded-[14px] object-cover border border-[#E5E8EE] dark:border-[#252A34] bg-black"
               />
             ) : stagedMedia.kind === 'video' && stagedMedia.previewUrl ? (
-              <div className="relative w-20 h-16 rounded-xl overflow-hidden border border-[#E5E8EE] dark:border-[#252A34] bg-black">
+              <div className="relative w-28 h-20 rounded-[14px] overflow-hidden border border-[#E5E8EE] dark:border-[#252A34] bg-black">
                 <video
                   src={stagedMedia.previewUrl}
                   muted
@@ -762,13 +898,13 @@ export function ChatInputBar({
                   className="w-full h-full object-cover"
                 />
                 {stagedMedia.durationSec ? (
-                  <span className="absolute bottom-1 right-1 px-1 py-0.5 rounded bg-black/75 text-[10px] font-semibold text-white tabular-nums">
+                  <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/75 text-[10px] font-semibold text-white tabular-nums">
                     {formatMediaDuration(stagedMedia.durationSec)}
                   </span>
                 ) : null}
               </div>
             ) : (
-              <div className="w-14 h-14 rounded-xl bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
+              <div className="w-16 h-16 rounded-xl bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
                 <FileText className="w-6 h-6" />
               </div>
             )}
@@ -778,9 +914,9 @@ export function ChatInputBar({
               disabled={sending}
               onClick={clearStagedMedia}
               aria-label="Remove preview"
-              className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-[#0F172A] text-white flex items-center justify-center shadow cursor-pointer"
+              className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-[#0F172A] text-white flex items-center justify-center shadow cursor-pointer"
             >
-              <X className="w-3 h-3" />
+              <X className="w-3.5 h-3.5" />
             </button>
           </div>
 
@@ -792,8 +928,8 @@ export function ChatInputBar({
                   ? 'Video ready to send'
                   : stagedMedia.file.name}
             </p>
-            <p className="text-[11px] text-[#64748B] dark:text-[#94A3B8] truncate">
-              {formatFileSize(stagedMedia.file.size)} · Tap Send to deliver
+            <p className="text-[11px] text-[#64748B] dark:text-[#94A3B8] truncate mt-0.5">
+              {formatFileSize(stagedMedia.file.size)} · Full HD up to 1080px
             </p>
           </div>
 
@@ -808,7 +944,7 @@ export function ChatInputBar({
                 caption: draft.trim(),
               })
             }
-            className="h-9 px-3.5 rounded-full bg-[#1877F2] hover:bg-[#166FE5] text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50 shrink-0 cursor-pointer"
+            className="h-9 px-4 rounded-full bg-[#1877F2] hover:bg-[#166FE5] text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50 shrink-0 cursor-pointer"
           >
             {sending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
             <span>Send</span>
@@ -911,7 +1047,6 @@ export function ChatInputBar({
       {/* Facebook Messenger Voice Recording Bar OR Standard [Emoji] [Message] [Attach] [Camera] [Mic/Send] */}
       {isRecording ? (
         <div className="p-2.5 flex items-center justify-between gap-2">
-          {/* Cancel / Delete */}
           <button
             type="button"
             onClick={() => stopVoiceRecording(true)}
@@ -922,7 +1057,6 @@ export function ChatInputBar({
             <Trash2 className="w-4 h-4" />
           </button>
 
-          {/* Red dot + Timer + Live Waveform + Recording... */}
           <div className="flex-1 min-w-0 flex items-center gap-2.5 px-3 py-2 rounded-full bg-[#FEF2F2] dark:bg-[#2B1517] border border-[#FECACA]/60 dark:border-[#7F1D1D]/60">
             <span className="w-2.5 h-2.5 rounded-full bg-[#EF4444] animate-pulse shrink-0" />
             <span className="text-xs font-bold text-[#B91C1C] dark:text-[#FCA5A5] tabular-nums shrink-0">
@@ -942,7 +1076,6 @@ export function ChatInputBar({
             </span>
           </div>
 
-          {/* Lock Hands-Free Button */}
           <button
             type="button"
             onClick={() => {
@@ -961,7 +1094,6 @@ export function ChatInputBar({
             {isRecordLocked ? <Lock className="w-4 h-4" /> : <LockOpen className="w-4 h-4" />}
           </button>
 
-          {/* Send Voice Button */}
           <button
             type="button"
             onClick={() => stopVoiceRecording(false)}
@@ -1042,7 +1174,7 @@ export function ChatInputBar({
             <Camera className="w-[18px] h-[18px]" />
           </button>
 
-          {/* [Mic] -> becomes [Send] when text or photo preview is present */}
+          {/* [Mic] -> turns from blue to white once permission is granted; becomes [Send] when text/photo is present */}
           {hasTextOrMedia ? (
             <button
               type="submit"
@@ -1055,18 +1187,111 @@ export function ChatInputBar({
           ) : (
             <button
               type="button"
-              disabled={sending}
+              disabled={sending || requestingMic}
               onPointerDown={handleMicPointerDown}
               onPointerUp={handleMicPointerUp}
+              onClick={handleMicClick}
               onContextMenu={(e) => e.preventDefault()}
-              aria-label="Hold or tap to record voice message"
-              title="Tap or hold to record voice message"
-              className="w-10 h-10 rounded-full bg-[#1877F2]/12 hover:bg-[#1877F2]/20 text-[#1877F2] dark:text-[#60A5FA] flex items-center justify-center disabled:opacity-45 active:scale-95 transition-all shrink-0 touch-none select-none cursor-pointer"
+              aria-label="Record voice message"
+              title={
+                micPermission === 'granted'
+                  ? 'Hold or tap to record voice message'
+                  : 'Tap to allow microphone and record voice'
+              }
+              className={`w-10 h-10 rounded-full flex items-center justify-center disabled:opacity-45 active:scale-95 transition-all shrink-0 touch-none select-none cursor-pointer ${
+                micPermission === 'granted'
+                  ? 'bg-[#1877F2] hover:bg-[#166FE5] text-white shadow-xs'
+                  : 'bg-[#1877F2]/12 hover:bg-[#1877F2]/20 text-[#1877F2] dark:text-[#60A5FA]'
+              }`}
             >
-              <Mic className="w-[18px] h-[18px]" />
+              {requestingMic ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Mic className="w-[18px] h-[18px]" />
+              )}
             </button>
           )}
         </form>
+      )}
+
+      {/* Microphone Blocked — Browser / Android Settings Instructions Modal */}
+      {showMicSettingsModal && (
+        <div
+          onClick={() => setShowMicSettingsModal(false)}
+          className="fixed inset-0 z-[135] bg-black/75 backdrop-blur-xs flex items-end sm:items-center justify-center p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl shadow-2xl overflow-hidden"
+          >
+            <div className="px-5 py-4 border-b border-[#E5E8EE] dark:border-[#252A34] flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <span className="w-9 h-9 rounded-full bg-[#1877F2]/12 text-[#1877F2] dark:text-[#60A5FA] flex items-center justify-center">
+                  <Mic className="w-4 h-4" />
+                </span>
+                <h3 className="font-display font-bold text-base text-[#0F172A] dark:text-white">
+                  Enable Microphone
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowMicSettingsModal(false)}
+                aria-label="Close microphone instructions"
+                className="w-8 h-8 rounded-full hover:bg-[#F4F6F9] dark:hover:bg-[#232732] text-[#64748B] flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-3.5 text-sm text-[#334155] dark:text-[#CBD5E1]">
+              <p>
+                Microphone permission was previously blocked by your browser or device. To turn it
+                back on:
+              </p>
+
+              <div className="rounded-xl bg-[#F4F6F9] dark:bg-[#0E1014] border border-[#E5E8EE] dark:border-[#252A34] p-3.5 space-y-2 text-xs">
+                <p className="font-semibold text-[#0F172A] dark:text-white">
+                  Browser Settings &gt; Site Settings &gt; Microphone &gt; Allow
+                </p>
+                <ol className="list-decimal list-inside space-y-1 text-[#64748B] dark:text-[#94A3B8]">
+                  <li>Tap the lock / tune icon next to the website URL (or browser menu ⋮).</li>
+                  <li>Open <strong>Site Settings</strong> (or <strong>Permissions</strong>).</li>
+                  <li>Tap <strong>Microphone</strong> and select <strong>Allow</strong>.</li>
+                  <li>Return here and tap <strong>Try Again</strong>.</li>
+                </ol>
+              </div>
+
+              {isInsideIframe && (
+                <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
+                  Tip: Tap <strong>Open Settings</strong> below to launch Verve in a full browser
+                  tab where your device lets you enable Microphone directly.
+                </p>
+              )}
+
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={handleOpenBrowserSettings}
+                  className="flex-1 h-10 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  {isInsideIframe ? (
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  ) : (
+                    <Settings className="w-3.5 h-3.5" />
+                  )}
+                  <span>Open Settings</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void requestMicAndRecord(true, false)}
+                  className="h-10 px-4 rounded-xl bg-[#F4F6F9] dark:bg-[#232732] hover:bg-[#E5E8EE] dark:hover:bg-[#2E3442] text-[#0F172A] dark:text-white text-xs font-semibold cursor-pointer"
+                >
+                  Try Again
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Live Camera Capture Modal */}

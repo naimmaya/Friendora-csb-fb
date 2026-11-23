@@ -1,4 +1,4 @@
-import {useMemo, useRef, useState} from 'react';
+import {useEffect, useMemo, useRef, useState} from 'react';
 import type {ChangeEvent, FormEvent} from 'react';
 import {
   AlertCircle,
@@ -29,7 +29,9 @@ import {
   deleteCommentPermanent,
   reportPostPermanent,
   setPostCommentsDisabledPermanent,
+  subscribePostReactionsPermanent,
   updatePostPermanent,
+  type PostReactionEntry,
 } from '../lib/firestoreStore';
 import type {
   CommentItem,
@@ -39,7 +41,11 @@ import type {
   UserProfile,
 } from '../types';
 import {Avatar, PostPhoto, PostVideo, useResolvedMediaUrl} from './MediaImage';
-import {ReactionActionButton, ReactionSummaryBar} from './ReactionPicker';
+import {
+  ReactionActionButton,
+  ReactionSummaryBar,
+  ReactionViewerModal,
+} from './ReactionPicker';
 
 interface PostCardProps {
   post: PostItem;
@@ -120,6 +126,34 @@ export function PostCard({
   const [deletingCommentId, setDeletingCommentId] = useState<number | null>(null);
   const replyInputRef = useRef<HTMLInputElement>(null);
   const editPhotoInputRef = useRef<HTMLInputElement>(null);
+
+  // Real-time Firestore onSnapshot state for post reactions (posts/{postId}/likes) + "People who reacted" popup
+  const [reactionViewerOpen, setReactionViewerOpen] = useState(false);
+  const [liveReactions, setLiveReactions] = useState<{
+    items: PostReactionEntry[];
+    likes_count: number;
+    liked_by_me: boolean;
+    my_reaction: ReactionType | null;
+    reaction_counts: Partial<Record<ReactionType, number>>;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!post.docId || !currentUser.uid) {
+      setLiveReactions(null);
+      return;
+    }
+    const unsub = subscribePostReactionsPermanent(post.docId, currentUser.uid, (data) => {
+      setLiveReactions(data);
+    });
+    return () => unsub();
+  }, [post.docId, currentUser.uid]);
+
+  const effectiveLikesCount = liveReactions ? liveReactions.likes_count : post.likes_count;
+  const effectiveLikedByMe = liveReactions ? liveReactions.liked_by_me : post.liked_by_me;
+  const effectiveMyReaction = liveReactions ? liveReactions.my_reaction : post.my_reaction || null;
+  const effectiveReactionCounts = liveReactions
+    ? liveReactions.reaction_counts
+    : post.reaction_counts || {};
 
   const resolvedEditPreview = useResolvedMediaUrl(editImageUrl);
 
@@ -483,9 +517,10 @@ export function PostCard({
         {/* Engagement stats */}
         <div className="px-4 sm:px-5 py-2.5 flex items-center justify-between text-xs text-[#64748B] dark:text-[#94A3B8]">
           <ReactionSummaryBar
-            totalCount={post.likes_count}
-            reactionCounts={post.reaction_counts}
-            myReaction={post.my_reaction || (post.liked_by_me ? 'like' : null)}
+            totalCount={effectiveLikesCount}
+            reactionCounts={effectiveReactionCounts}
+            myReaction={effectiveMyReaction || (effectiveLikedByMe ? 'like' : null)}
+            onOpenViewer={() => setReactionViewerOpen(true)}
           />
           <button
             type="button"
@@ -505,8 +540,8 @@ export function PostCard({
           } gap-1`}
         >
           <ReactionActionButton
-            myReaction={post.my_reaction || null}
-            likedByMe={post.liked_by_me}
+            myReaction={effectiveMyReaction}
+            likedByMe={effectiveLikedByMe}
             onReact={(reaction) => onToggleLike(post.id, reaction)}
           />
 
@@ -813,6 +848,17 @@ export function PostCard({
           </div>
         )}
       </article>
+
+      {/* PEOPLE WHO REACTED POPUP (Real-time Firestore onSnapshot + [All] [👍] [❤️] [🥰] [😆] [😮] [😢] [😡] filters) */}
+      {reactionViewerOpen && (
+        <ReactionViewerModal
+          items={liveReactions?.items || []}
+          reactionCounts={effectiveReactionCounts}
+          currentUserUid={currentUser.uid}
+          onClose={() => setReactionViewerOpen(false)}
+          onOpenProfile={onOpenProfile}
+        />
+      )}
 
       {/* 3-DOT BOTTOM POPUP SHEET (Facebook-style) */}
       {menuOpen && (

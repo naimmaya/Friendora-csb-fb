@@ -177,7 +177,7 @@
     },
     "PostReaction": {
       "title": "PostReaction",
-      "description": "Facebook-style reaction by a verified user on a post.",
+      "description": "Legacy Facebook-style reaction by a verified user on a post.",
       "type": "object",
       "properties": {
         "postId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
@@ -187,6 +187,21 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["postId", "userUid", "reaction", "createdAt", "updatedAt"]
+    },
+    "PostLike": {
+      "title": "PostLike",
+      "description": "Real-time Facebook-style reaction (like, love, care, haha, wow, sad, angry) by a verified user on a post.",
+      "type": "object",
+      "properties": {
+        "postId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "userAvatar": { "type": "string", "maxLength": 450000 },
+        "reactionType": { "type": "string", "enum": ["like", "love", "care", "haha", "wow", "sad", "angry"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["postId", "userUid", "userName", "userAvatar", "reactionType", "createdAt", "updatedAt"]
     },
     "PostComment": {
       "title": "PostComment",
@@ -610,7 +625,11 @@
     },
     "/posts/{postId}/reactions/{userUid}": {
       "schema": { "$ref": "#/entities/PostReaction" },
-      "description": "User reactions (like/love/care/haha/wow/sad/angry) on a post."
+      "description": "Legacy user reactions (like/love/care/haha/wow/sad/angry) on a post."
+    },
+    "/posts/{postId}/likes/{userUid}": {
+      "schema": { "$ref": "#/entities/PostLike" },
+      "description": "Real-time user reactions (reactionType: like/love/care/haha/wow/sad/angry) with reactor name and avatar."
     },
     "/posts/{postId}/comments/{commentId}": {
       "schema": { "$ref": "#/entities/PostComment" },

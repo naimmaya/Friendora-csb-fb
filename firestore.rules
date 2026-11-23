@@ -255,6 +255,43 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidPostLike(data, postId, reactorUid) {
+      return data.keys().hasAll([
+          'postId',
+          'userUid',
+          'userName',
+          'userAvatar',
+          'reactionType',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'postId',
+          'userUid',
+          'userName',
+          'userAvatar',
+          'reactionType',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.postId is string
+        && isValidId(data.postId)
+        && data.postId == postId
+        && data.userUid is string
+        && isValidId(data.userUid)
+        && data.userUid == reactorUid
+        && data.userUid == request.auth.uid
+        && data.userName is string
+        && data.userName.size() >= 1
+        && data.userName.size() <= 60
+        && data.userAvatar is string
+        && data.userAvatar.size() <= 450000
+        && data.reactionType is string
+        && data.reactionType in ['like', 'love', 'care', 'haha', 'wow', 'sad', 'angry']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     function isValidPostComment(data, postId, commentId) {
       return data.keys().hasAll([
           'id',
@@ -1168,6 +1205,39 @@ service cloud.firestore {
           && existing().userUid == request.auth.uid;
       }
 
+      match /likes/{reactorUid} {
+        allow get: if isVerifiedUser() && isValidId(postId) && isValidId(reactorUid);
+        allow list: if isVerifiedUser() && resource.data.postId == postId;
+
+        allow create: if isVerifiedUser()
+          && isValidId(postId)
+          && isValidId(reactorUid)
+          && isValidPostLike(incoming(), postId, reactorUid)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/posts/$(postId));
+
+        allow update: if isVerifiedUser()
+          && isValidId(postId)
+          && isValidId(reactorUid)
+          && isValidPostLike(incoming(), postId, reactorUid)
+          && existing().userUid == request.auth.uid
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'reactionType',
+            'userName',
+            'userAvatar',
+            'updatedAt'
+          ])
+          && exists(/databases/$(database)/documents/posts/$(postId));
+
+        allow delete: if isVerifiedUser()
+          && isValidId(postId)
+          && isValidId(reactorUid)
+          && existing().userUid == request.auth.uid;
+      }
+
       match /comments/{commentId} {
         allow get: if isVerifiedUser() && isValidId(postId) && isValidId(commentId);
         allow list: if isVerifiedUser() && resource.data.postId == postId;
@@ -1340,7 +1410,9 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().diff(existing()).affectedKeys().hasOnly(['read']);
 
-      allow delete: if false;
+      allow delete: if isVerifiedUser()
+        && isValidId(messageId)
+        && existing().senderUid == request.auth.uid;
     }
 
     // MESSENGER GROUP CHATS & GROUP MESSAGES
@@ -1432,7 +1504,12 @@ service cloud.firestore {
           && incoming().createdAt == request.time
           && request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.memberUids;
 
-        allow update, delete: if false;
+        allow update: if false;
+        allow delete: if isVerifiedUser()
+          && isValidId(groupId)
+          && isValidId(messageId)
+          && existing().senderUid == request.auth.uid
+          && request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.memberUids;
       }
     }
 

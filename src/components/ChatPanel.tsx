@@ -1,5 +1,6 @@
 import {useEffect, useRef, useState} from 'react';
 import {
+  AlertCircle,
   Bell,
   Check,
   CheckCheck,
@@ -14,6 +15,8 @@ import {
   X,
 } from 'lucide-react';
 import {formatRelativeTime} from '../lib/api';
+import {formatFirestoreErrorMessage} from '../lib/firebase';
+import {deleteMessagePermanent} from '../lib/firestoreStore';
 import type {
   CallType,
   ChatGroupDoc,
@@ -24,7 +27,8 @@ import type {
   UserProfile,
 } from '../types';
 import {ChatInputBar, type OutgoingChatPayload} from './ChatInputBar';
-import {ChatMessageBubble} from './ChatMessageBubble';
+import {ChatMessageBubble, type UnifiedBubbleMessage} from './ChatMessageBubble';
+import {ForwardMediaModal} from './ForwardMediaModal';
 import {CreateGroupModal, GroupChatWindow} from './GroupChatComponents';
 import {Avatar} from './MediaImage';
 
@@ -200,6 +204,8 @@ interface ChatWindowProps {
   onStartCall?: (peer: UserProfile, type: CallType) => void;
   onClose?: () => void;
   compact?: boolean;
+  forwardUsers?: UserProfile[];
+  forwardGroups?: ChatGroupDoc[];
 }
 
 export function ChatConversationWindow({
@@ -215,12 +221,26 @@ export function ChatConversationWindow({
   onStartCall,
   onClose,
   compact = false,
+  forwardUsers = [],
+  forwardGroups = [],
 }: ChatWindowProps) {
   const scrollEndRef = useRef<HTMLDivElement>(null);
+  const [forwardingMessage, setForwardingMessage] = useState<UnifiedBubbleMessage | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     scrollEndRef.current?.scrollIntoView({behavior: 'smooth'});
   }, [messages.length, isPeerTyping]);
+
+  async function handleDeleteDirectMessage(msg: UnifiedBubbleMessage) {
+    if (!msg.docId) return;
+    setActionError(null);
+    try {
+      await deleteMessagePermanent(msg.docId, msg.mediaUrl);
+    } catch (err) {
+      setActionError(formatFirestoreErrorMessage(err));
+    }
+  }
 
   const statusText = isPeerTyping
     ? 'Typing...'
@@ -303,6 +323,21 @@ export function ChatConversationWindow({
 
       {/* Messages body */}
       <div className="flex-1 overflow-y-auto p-4 space-y-2.5 bg-[#F8FAFC] dark:bg-[#101318]">
+        {actionError && (
+          <div className="flex items-center justify-between gap-2 rounded-xl bg-[#FEF2F2] dark:bg-[#3B181A] border border-[#FECACA] dark:border-[#7F1D1D] px-3 py-2 text-xs text-[#B91C1C] dark:text-[#FCA5A5]">
+            <span className="flex items-center gap-1.5 min-w-0">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{actionError}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setActionError(null)}
+              className="p-0.5 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-6">
             <Avatar src={peer.avatar_url} name={peer.name} size="lg" />
@@ -318,8 +353,11 @@ export function ChatConversationWindow({
             <ChatMessageBubble
               key={m.id}
               onCallBack={onStartCall ? (type) => onStartCall(peer, type) : undefined}
+              onDeleteMessage={m.docId ? handleDeleteDirectMessage : undefined}
+              onForwardMessage={(msg) => setForwardingMessage(msg)}
               message={{
                 id: m.id,
+                docId: m.docId,
                 mine: m.sender_id === currentUser.id,
                 content: m.content,
                 messageType: m.message_type || 'text',
@@ -363,6 +401,16 @@ export function ChatConversationWindow({
         onSend={(payload) => onSendMessage(peer.id, payload)}
         onTypingChange={(typing) => onTyping(peer.id, typing)}
       />
+
+      {forwardingMessage && (
+        <ForwardMediaModal
+          message={forwardingMessage}
+          currentUser={currentUser}
+          users={forwardUsers.length > 0 ? forwardUsers : [peer]}
+          groups={forwardGroups}
+          onClose={() => setForwardingMessage(null)}
+        />
+      )}
     </div>
   );
 }
@@ -618,6 +666,7 @@ export function MessagesPage({
                 group={selectedGroup}
                 currentUser={currentUser}
                 allUsers={allUsers}
+                allGroups={groups}
                 onStartGroupCall={onStartGroupCall}
                 onGroupLeftOrDeleted={() => onSelectGroup(null)}
               />
@@ -651,6 +700,8 @@ export function MessagesPage({
               onTyping={onTyping}
               onOpenProfile={onOpenProfile}
               onStartCall={onStartCall}
+              forwardUsers={allUsers}
+              forwardGroups={groups}
             />
           ) : (
             <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] shadow-[0_1px_2px_rgba(15,23,42,0.04)] rounded-2xl p-10 text-center">

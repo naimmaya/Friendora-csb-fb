@@ -20,6 +20,7 @@ import type {
   UserProfile,
 } from '../types';
 import {db, handleFirestoreError, OperationType} from './firebase';
+import {deleteFirebaseStorageUrlIfApplicable} from './mediaUpload';
 
 function makeId(prefix: string): string {
   const rand =
@@ -213,6 +214,22 @@ export function subscribeGroupMessagesPermanent(
       }
     },
   );
+}
+
+export async function deleteGroupMessagePermanent(
+  groupId: string,
+  messageDocId: string,
+  mediaUrl?: string | null,
+): Promise<void> {
+  if (!groupId || !messageDocId) return;
+  try {
+    await deleteDoc(doc(db, 'groups', groupId, 'messages', messageDocId));
+    if (mediaUrl) {
+      await deleteFirebaseStorageUrlIfApplicable(mediaUrl);
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `groups/${groupId}/messages/${messageDocId}`);
+  }
 }
 
 function summarizeGroupPreview(params: {

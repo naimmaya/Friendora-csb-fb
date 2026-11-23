@@ -1,6 +1,8 @@
-import {useEffect, useRef, useState} from 'react';
-import {ThumbsUp} from 'lucide-react';
+import {useEffect, useMemo, useRef, useState} from 'react';
+import {ThumbsUp, X} from 'lucide-react';
+import type {PostReactionEntry} from '../lib/firestoreStore';
 import type {ReactionType} from '../types';
+import {Avatar} from './MediaImage';
 
 export interface ReactionMeta {
   type: ReactionType;
@@ -11,6 +13,7 @@ export interface ReactionMeta {
   badgeBg: string;
 }
 
+// Exact 7 Facebook reactions in order: Like, Love, Care, Haha, Wow, Sad, Angry
 export const REACTIONS: ReactionMeta[] = [
   {
     type: 'like',
@@ -82,10 +85,12 @@ export function ReactionSummaryBar({
   totalCount,
   reactionCounts,
   myReaction,
+  onOpenViewer,
 }: {
   totalCount: number;
   reactionCounts?: Partial<Record<ReactionType, number>>;
   myReaction?: ReactionType | null;
+  onOpenViewer?: () => void;
 }) {
   const [showBreakdown, setShowBreakdown] = useState(false);
 
@@ -110,9 +115,17 @@ export function ReactionSummaryBar({
     <div className="relative inline-flex items-center">
       <button
         type="button"
-        onClick={() => setShowBreakdown((prev) => !prev)}
+        onClick={() => {
+          if (onOpenViewer) {
+            setShowBreakdown(false);
+            onOpenViewer();
+          } else {
+            setShowBreakdown((prev) => !prev);
+          }
+        }}
         onMouseEnter={() => setShowBreakdown(true)}
         onMouseLeave={() => setShowBreakdown(false)}
+        aria-label="View people who reacted"
         className="inline-flex items-center gap-1.5 text-xs text-[#64748B] dark:text-[#94A3B8] hover:underline cursor-pointer"
       >
         <span className="inline-flex items-center -space-x-1">
@@ -139,7 +152,7 @@ export function ReactionSummaryBar({
       </button>
 
       {showBreakdown && entries.length > 0 && (
-        <div className="absolute left-0 bottom-full mb-2 z-30 min-w-[150px] rounded-xl bg-[#0F172A]/95 dark:bg-[#232732] text-white px-3 py-2 shadow-lg text-xs space-y-1 pointer-events-none">
+        <div className="hidden sm:block absolute left-0 bottom-full mb-2 z-30 min-w-[155px] rounded-xl bg-[#0F172A]/95 dark:bg-[#232732] text-white px-3 py-2 shadow-lg text-xs space-y-1 pointer-events-none">
           {entries.map(([type, count]) => {
             const meta = REACTION_MAP[type] || REACTION_MAP.like;
             return (
@@ -154,6 +167,149 @@ export function ReactionSummaryBar({
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+interface ReactionViewerModalProps {
+  items: PostReactionEntry[];
+  reactionCounts: Partial<Record<ReactionType, number>>;
+  currentUserUid?: string;
+  onClose: () => void;
+  onOpenProfile: (userId: number) => void;
+}
+
+export function ReactionViewerModal({
+  items,
+  reactionCounts,
+  currentUserUid,
+  onClose,
+  onOpenProfile,
+}: ReactionViewerModalProps) {
+  const [activeFilter, setActiveFilter] = useState<'all' | ReactionType>('all');
+
+  const filteredItems = useMemo(() => {
+    if (activeFilter === 'all') return items;
+    return items.filter((item) => item.reactionType === activeFilter);
+  }, [items, activeFilter]);
+
+  const activeMeta = activeFilter === 'all' ? null : REACTION_MAP[activeFilter];
+
+  return (
+    <div
+      onClick={onClose}
+      className="fixed inset-0 z-[125] bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-full sm:max-w-md bg-white dark:bg-[#16191F] border-t sm:border border-[#E5E8EE] dark:border-[#252A34] rounded-t-3xl sm:rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[82vh]"
+      >
+        {/* Mobile grab handle */}
+        <div className="sm:hidden flex justify-center pt-2.5 pb-1">
+          <div className="w-10 h-1 rounded-full bg-[#CBD5E1] dark:bg-[#3B4252]" />
+        </div>
+
+        {/* Header */}
+        <div className="px-4 py-3 border-b border-[#E5E8EE] dark:border-[#252A34] flex items-center justify-between">
+          <h3 className="font-display font-bold text-base text-[#0F172A] dark:text-white">
+            People who reacted
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close reactions viewer"
+            className="w-8 h-8 rounded-full hover:bg-[#F0F2F5] dark:hover:bg-[#232732] text-[#64748B] flex items-center justify-center cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Filter Tabs: [All] [👍 Like] [❤️ Love] [🥰 Care] [😆 Haha] [😮 Wow] [😢 Sad] [😡 Angry] */}
+        <div className="px-2 pt-1.5 border-b border-[#E5E8EE] dark:border-[#252A34] flex items-center gap-1 overflow-x-auto no-scrollbar">
+          <button
+            type="button"
+            onClick={() => setActiveFilter('all')}
+            className={`px-3 py-2 text-xs font-semibold whitespace-nowrap border-b-2 transition-colors cursor-pointer ${
+              activeFilter === 'all'
+                ? 'border-[#1877F2] text-[#1877F2] dark:text-[#60A5FA]'
+                : 'border-transparent text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F172A] dark:hover:text-white'
+            }`}
+          >
+            All <span className="tabular-nums ml-0.5">{items.length}</span>
+          </button>
+
+          {REACTIONS.map((meta) => {
+            const count = reactionCounts[meta.type] || 0;
+            const isActive = activeFilter === meta.type;
+            return (
+              <button
+                key={meta.type}
+                type="button"
+                onClick={() => setActiveFilter(meta.type)}
+                className={`px-2.5 py-2 text-xs font-semibold whitespace-nowrap border-b-2 inline-flex items-center gap-1 transition-colors cursor-pointer ${
+                  isActive
+                    ? 'border-[#1877F2] text-[#0F172A] dark:text-white'
+                    : 'border-transparent text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F172A] dark:hover:text-white'
+                }`}
+              >
+                <span className="text-sm leading-none" role="img" aria-hidden="true">
+                  {meta.emoji}
+                </span>
+                <span>{meta.label}</span>
+                {count > 0 && <span className="tabular-nums opacity-80">{count}</span>}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Real-time Reactor List */}
+        <div className="overflow-y-auto flex-1 divide-y divide-[#E5E8EE] dark:divide-[#252A34]">
+          {filteredItems.length === 0 ? (
+            <div className="p-8 text-center text-sm text-[#64748B] dark:text-[#94A3B8]">
+              {activeMeta
+                ? `No ${activeMeta.emoji} ${activeMeta.label} reactions yet.`
+                : 'No reactions yet.'}
+            </div>
+          ) : (
+            filteredItems.map((entry) => {
+              const meta = REACTION_MAP[entry.reactionType] || REACTION_MAP.like;
+              const isMe = Boolean(currentUserUid && entry.userUid === currentUserUid);
+              return (
+                <button
+                  key={`${entry.userUid}-${entry.reactionType}`}
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenProfile(entry.userId);
+                  }}
+                  className="w-full px-4 py-3 flex items-center justify-between gap-3 hover:bg-[#F8FAFC] dark:hover:bg-[#1E222B] transition-colors text-left cursor-pointer"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="relative shrink-0">
+                      <Avatar src={entry.userAvatar} name={entry.userName} size="sm" />
+                      <span
+                        className={`absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full ${meta.badgeBg} ring-2 ring-white dark:ring-[#16191F] flex items-center justify-center text-[9px] leading-none`}
+                      >
+                        {meta.emoji}
+                      </span>
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-[#0F172A] dark:text-white truncate">
+                        {entry.userName}
+                        {isMe ? ' (You)' : ''}
+                      </p>
+                      <p className={`text-[11px] font-medium ${meta.textColor}`}>{meta.label}</p>
+                    </div>
+                  </div>
+                  <span className="text-lg leading-none shrink-0" role="img" aria-label={meta.label}>
+                    {meta.emoji}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -244,9 +400,6 @@ export function ReactionActionButton({
       longPressTriggered.current = false;
       return;
     }
-    // On mobile/touch or if tray isn't open yet via click:
-    // Opening the reaction picker tray on tap lets users immediately pick Like, Love, Care, Haha, Wow, Sad, Angry.
-    // Tapping the button again while the tray is open selects Like (or toggles off current reaction).
     const isTouch =
       (e.nativeEvent as PointerEvent)?.pointerType === 'touch' ||
       window.matchMedia('(hover: none)').matches;
@@ -257,7 +410,6 @@ export function ReactionActionButton({
     }
 
     if (isTouch) {
-      // Second tap on main button while tray is open -> quick toggle Like / remove active
       onReact(effectiveReaction || 'like');
       setTrayOpen(false);
     } else {
@@ -280,14 +432,14 @@ export function ReactionActionButton({
       onMouseLeave={handleMouseLeave}
       className="relative"
     >
-      {/* Floating Facebook-style Reactions Picker Dock */}
+      {/* Floating Facebook-style 7-Reaction Picker Dock: 👍 ❤️ 🥰 😆 😮 😢 😡 */}
       {trayOpen && (
         <div
           role="menu"
           aria-label="Choose a reaction"
-          className="absolute bottom-full left-0 pb-2 z-40"
+          className="absolute bottom-full left-0 pb-2 z-40 max-w-[calc(100vw-2rem)]"
         >
-          <div className="flex items-center gap-0.5 sm:gap-1 px-2 py-1.5 rounded-full bg-white dark:bg-[#1E222B] border border-[#E5E8EE] dark:border-[#303644] shadow-[0_10px_30px_rgba(15,23,42,0.18)] dark:shadow-[0_12px_32px_rgba(0,0,0,0.6)]">
+          <div className="flex items-center gap-0.5 sm:gap-1 px-1.5 sm:px-2 py-1.5 rounded-full bg-white dark:bg-[#1E222B] border border-[#E5E8EE] dark:border-[#303644] shadow-[0_10px_30px_rgba(15,23,42,0.18)] dark:shadow-[0_12px_32px_rgba(0,0,0,0.6)]">
             {REACTIONS.map((item) => {
               const isSelected = effectiveReaction === item.type;
               const isHovered = hoveredType === item.type;
@@ -297,10 +449,11 @@ export function ReactionActionButton({
                   type="button"
                   role="menuitem"
                   aria-label={item.label}
+                  title={item.label}
                   onMouseEnter={() => setHoveredType(item.type)}
                   onMouseLeave={() => setHoveredType(null)}
                   onClick={() => handleSelectReaction(item.type)}
-                  className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center transition-transform duration-150 cursor-pointer select-none ${
+                  className={`relative w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center transition-transform duration-150 cursor-pointer select-none ${
                     isHovered ? 'scale-135 -translate-y-1.5' : 'hover:scale-125 active:scale-110'
                   } ${
                     isSelected
@@ -313,7 +466,11 @@ export function ReactionActionButton({
                       {item.label}
                     </span>
                   )}
-                  <span className="text-[22px] sm:text-[26px] leading-none" role="img" aria-hidden="true">
+                  <span
+                    className="text-[20px] sm:text-[26px] leading-none"
+                    role="img"
+                    aria-hidden="true"
+                  >
                     {item.emoji}
                   </span>
                 </button>

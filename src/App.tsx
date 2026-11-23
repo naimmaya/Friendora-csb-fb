@@ -41,6 +41,7 @@ import {PagesHubView} from './components/PagesHubView';
 import {PostCard} from './components/PostCard';
 import {PostComposer} from './components/PostComposer';
 import {ProfileView} from './components/ProfileView';
+import {SearchPageView} from './components/SearchPageView';
 import {SettingsView} from './components/SettingsView';
 import {saveAccountToVault} from './lib/accountVault';
 import {subscribeIncomingCalls} from './lib/callService';
@@ -112,7 +113,8 @@ function parseLocation() {
 
   let appView: AppView = 'home';
   let profileId: number | null = null;
-  if (path === '/friends') appView = 'friends';
+  if (path === '/search') appView = 'search';
+  else if (path === '/friends') appView = 'friends';
   else if (path === '/messages') appView = 'messages';
   else if (path === '/notifications') appView = 'notifications';
   else if (path === '/menu') appView = 'menu';
@@ -176,7 +178,6 @@ export default function App() {
   const [loadingPosts, setLoadingPosts] = useState(false);
   const [savedPostDocIds, setSavedPostDocIds] = useState<Set<string>>(() => new Set());
   const [hiddenPostDocIds, setHiddenPostDocIds] = useState<Set<string>>(() => new Set());
-  const [searchQuery, setSearchQuery] = useState('');
 
   // Network, notifications, chat, presence, typing, groups & pages state (all synced from Cloud Firestore)
   const [network, setNetwork] = useState<NetworkData>({
@@ -348,6 +349,49 @@ export default function App() {
       unsubAuth?.();
     };
   }, []);
+
+  // Ask for Microphone permission silently once on app open (never shows a red error bar if denied!)
+  useEffect(() => {
+    if (!currentUser?.uid) return;
+    if (!navigator.mediaDevices?.getUserMedia) return;
+    try {
+      if (sessionStorage.getItem('verve_mic_prompted') === '1') return;
+    } catch {
+      // Ignore storage errors
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        if (navigator.permissions?.query) {
+          const status = await navigator.permissions.query({
+            name: 'microphone' as PermissionName,
+          });
+          if (cancelled || status.state !== 'prompt') {
+            try {
+              sessionStorage.setItem('verve_mic_prompted', '1');
+            } catch {
+              // Ignore
+            }
+            return;
+          }
+        }
+        try {
+          sessionStorage.setItem('verve_mic_prompted', '1');
+        } catch {
+          // Ignore
+        }
+        const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+        stream.getTracks().forEach((t) => t.stop());
+      } catch {
+        // User denied or dismissed — stay completely silent (no red error bar)
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.uid]);
 
   // 2. REAL-TIME FIRESTORE SUBSCRIPTIONS: Users, Posts, Saved, Hidden, Notifications, Calls, Presence, Typing, Groups, Group Calls, Pages
   useEffect(() => {
@@ -530,19 +574,6 @@ export default function App() {
       setActiveChatPeer(fresh);
     }
   }, [allUsers, activeChatPeer]);
-
-  // Derived search results from live Cloud Firestore users (zero mock data)
-  const searchResults = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q || !currentUser) return [];
-    return allUsers.filter(
-      (u) =>
-        u.uid !== currentUser.uid &&
-        (u.name.toLowerCase().includes(q) ||
-          u.work.toLowerCase().includes(q) ||
-          u.location.toLowerCase().includes(q)),
-    );
-  }, [searchQuery, allUsers, currentUser]);
 
   // Decorated posts with real Firestore saved_by_me status
   const decoratedPosts = useMemo(() => {
@@ -1126,52 +1157,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Search People (Live Firestore Users) */}
-            <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-3.5 space-y-2.5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-              <div className="relative">
-                <Search className="w-4 h-4 text-[#65676B] dark:text-[#9CA3AF] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  type="search"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Find people on Verve..."
-                  className="w-full h-9 pl-9 pr-3 rounded-xl bg-[#F0F2F5] dark:bg-[#121316] text-xs text-[#111827] dark:text-white placeholder:text-[#65676B] dark:placeholder:text-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#1877F2]"
-                />
-              </div>
-
-              {searchQuery.trim() && (
-                <div className="divide-y divide-[#E4E6EB] dark:divide-[#2E3035] max-h-52 overflow-y-auto">
-                  {searchResults.length === 0 ? (
-                    <p className="py-2 text-xs text-[#65676B] dark:text-[#9CA3AF] text-center">
-                      No matching people
-                    </p>
-                  ) : (
-                    searchResults.map((u) => (
-                      <button
-                        key={u.id}
-                        type="button"
-                        onClick={() => {
-                          setSearchQuery('');
-                          navigateApp('profile', u.id);
-                        }}
-                        className="w-full py-2 flex items-center gap-2.5 text-left hover:bg-[#F0F2F5] dark:hover:bg-[#24262B] px-1.5 rounded-lg cursor-pointer"
-                      >
-                        <Avatar src={u.avatar_url} name={u.name} size="xs" />
-                        <div className="min-w-0">
-                          <span className="text-xs font-semibold text-[#111827] dark:text-white truncate block">
-                            {u.name}
-                          </span>
-                          <span className="text-[11px] text-[#65676B] dark:text-[#9CA3AF] truncate block">
-                            {u.work || u.location || 'Member'}
-                          </span>
-                        </div>
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-
             {/* Preferences & Sign Out */}
             <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-2 space-y-1 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
               <button
@@ -1261,6 +1246,56 @@ export default function App() {
             {/* HOME FEED */}
             {appView === 'home' && (
               <div className="space-y-4">
+                {/* Single Facebook-style Home Top Search Bar: [Profile Photo] [Search...] [Bell] [Messenger] */}
+                <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl px-3 py-2.5 flex items-center gap-2.5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+                  <button
+                    type="button"
+                    onClick={() => navigateApp('profile', currentUser.id)}
+                    aria-label="Open my profile"
+                    className="shrink-0 rounded-full cursor-pointer"
+                  >
+                    <Avatar src={currentUser.avatar_url} name={currentUser.name} size="sm" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => navigateApp('search')}
+                    aria-label="Search people and pages"
+                    className="flex-1 min-w-0 h-10 px-3.5 rounded-full bg-[#F0F2F5] dark:bg-[#0E1014] hover:bg-[#E4E6EB] dark:hover:bg-[#1E222B] flex items-center gap-2 text-left text-sm text-[#64748B] dark:text-[#94A3B8] transition-colors cursor-pointer"
+                  >
+                    <Search className="w-4 h-4 shrink-0" />
+                    <span className="truncate">Search...</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => navigateApp('notifications')}
+                    aria-label="Open notifications"
+                    className="relative w-10 h-10 rounded-full bg-[#F0F2F5] dark:bg-[#232732] hover:bg-[#E4E6EB] dark:hover:bg-[#2E3442] text-[#0F172A] dark:text-white flex items-center justify-center shrink-0 transition-colors cursor-pointer"
+                  >
+                    <Bell className="w-[18px] h-[18px]" />
+                    {unreadNotifications > 0 && (
+                      <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-[#EF4444] text-white text-[10px] font-bold flex items-center justify-center tabular-nums">
+                        {unreadNotifications > 99 ? '99+' : unreadNotifications}
+                      </span>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => navigateApp('messages')}
+                    aria-label="Open Messenger"
+                    className="relative w-10 h-10 rounded-full bg-[#F0F2F5] dark:bg-[#232732] hover:bg-[#E4E6EB] dark:hover:bg-[#2E3442] text-[#0F172A] dark:text-white flex items-center justify-center shrink-0 transition-colors cursor-pointer"
+                  >
+                    <MessageSquare className="w-[18px] h-[18px]" />
+                    {unreadMessages > 0 && (
+                      <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-[#1877F2] text-white text-[10px] font-bold flex items-center justify-center tabular-nums">
+                        {unreadMessages > 99 ? '99+' : unreadMessages}
+                      </span>
+                    )}
+                  </button>
+                </div>
+
                 <PostComposer
                   currentUser={currentUser}
                   onOpenProfile={(uid) => navigateApp('profile', uid)}
@@ -1370,6 +1405,21 @@ export default function App() {
                   ))
                 )}
               </div>
+            )}
+
+            {/* UNIFIED REAL-TIME FIRESTORE SEARCH PAGE (People + Pages) */}
+            {appView === 'search' && (
+              <SearchPageView
+                currentUser={currentUser}
+                allUsers={allUsers}
+                pages={pages}
+                network={network}
+                onlineUserIds={onlineUserIds}
+                onBack={() => navigateApp('home')}
+                onOpenProfile={(uid) => navigateApp('profile', uid)}
+                onOpenChat={handleOpenChat}
+                onOpenPage={handleOpenPage}
+              />
             )}
 
             {/* PROFILE VIEW */}
@@ -1660,6 +1710,8 @@ export default function App() {
             onOpenProfile={(uid) => navigateApp('profile', uid)}
             onStartCall={handleStartCall}
             onClose={() => setFloatingChatOpen(false)}
+            forwardUsers={allUsers}
+            forwardGroups={groups}
           />
         </div>
       )}
