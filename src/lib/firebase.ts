@@ -242,6 +242,9 @@ export async function loadUserProfileFromFirestore(user: User): Promise<{
   phone?: string;
   date_of_birth?: string;
   created_at?: string;
+  status?: 'active' | 'suspended';
+  is_suspended?: boolean;
+  report_count?: number;
 } | null> {
   if (!user.uid) return null;
   const publicRef = doc(db, 'users', user.uid);
@@ -256,6 +259,7 @@ export async function loadUserProfileFromFirestore(user: User): Promise<{
       createdAtTs && typeof createdAtTs.toDate === 'function'
         ? createdAtTs.toDate().toISOString()
         : new Date().toISOString();
+    const isSuspended = pub.isSuspended === true || pub.status === 'suspended';
     return {
       name: typeof pub.name === 'string' ? pub.name : undefined,
       bio: typeof pub.bio === 'string' ? pub.bio : undefined,
@@ -267,6 +271,9 @@ export async function loadUserProfileFromFirestore(user: User): Promise<{
       phone: typeof priv.phone === 'string' && priv.phone ? priv.phone : undefined,
       date_of_birth: typeof priv.dateOfBirth === 'string' ? priv.dateOfBirth : undefined,
       created_at: createdAtIso,
+      status: isSuspended ? 'suspended' : 'active',
+      is_suspended: isSuspended,
+      report_count: typeof pub.reportCount === 'number' ? pub.reportCount : 0,
     };
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, `users/${user.uid}`);

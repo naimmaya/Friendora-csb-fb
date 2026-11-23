@@ -3,6 +3,7 @@ import type {FormEvent} from 'react';
 import {
   AlertCircle,
   ArrowLeft,
+  Ban,
   Bell,
   Check,
   CheckCircle2,
@@ -30,10 +31,11 @@ import {
 } from 'lucide-react';
 import {updateVaultPasswordByIdentifier} from '../lib/accountVault';
 import {apiRequest} from '../lib/api';
-import {auth} from '../lib/firebase';
-import {saveUserProfilePermanent} from '../lib/firestoreStore';
+import {auth, formatFirestoreErrorMessage} from '../lib/firebase';
+import {saveUserProfilePermanent, unblockUserPermanent} from '../lib/firestoreStore';
 import type {
   ActiveSessionItem,
+  BlockedUserItem,
   LinkedAccountItem,
   PasskeyItem,
   SecurityEmailItem,
@@ -53,6 +55,7 @@ interface SettingsViewProps {
   onOpenProfile: () => void;
   onOpenPages: () => void;
   onUserUpdated: (user: UserProfile) => void;
+  blockedUsers?: BlockedUserItem[];
 }
 
 type PersonalSubView = 'main' | 'contact' | 'dob' | 'ownership' | 'add-account' | 'manage-linked';
@@ -225,6 +228,7 @@ export function SettingsView({
   onOpenProfile,
   onOpenPages,
   onUserUpdated,
+  blockedUsers = [],
 }: SettingsViewProps) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [personalSub, setPersonalSub] = useState<PersonalSubView>('main');
@@ -282,6 +286,7 @@ export function SettingsView({
   // UI feedback states
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [unblockingUid, setUnblockingUid] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -506,6 +511,11 @@ export function SettingsView({
         action: () => handleNavigateSection('privacy'),
       },
       {
+        label: 'Blocked People',
+        hint: 'View and unblock accounts you have blocked',
+        action: () => handleNavigateSection('blocked-people'),
+      },
+      {
         label: 'Notifications',
         hint: 'In-app alerts and email digests',
         action: () => handleNavigateSection('notifications'),
@@ -551,6 +561,7 @@ export function SettingsView({
       return subMap[securitySub];
     }
     if (section === 'privacy') return 'Settings / Privacy Checkup';
+    if (section === 'blocked-people') return 'Settings / Blocked People';
     if (section === 'notifications') return 'Settings / Notifications';
     return 'Settings / Display & Language';
   }, [section, personalSub, securitySub]);
@@ -1093,6 +1104,29 @@ export function SettingsView({
                                 ? 'Public profile'
                                 : 'Friends only'}{' '}
                               · Active status {settings.show_online_status ? 'On' : 'Off'}
+                            </p>
+                          </div>
+                        </div>
+                        <ChevronRight className="w-5 h-5 text-[#94A3B8]" />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleNavigateSection('blocked-people')}
+                        className="w-full px-5 py-3.5 flex items-center justify-between gap-3 hover:bg-[#F8FAFC] dark:hover:bg-[#1D222B] transition-colors text-left cursor-pointer"
+                      >
+                        <div className="flex items-center gap-3.5">
+                          <Ban className="w-5 h-5 text-[#DC2626] dark:text-[#F87171]" />
+                          <div>
+                            <p className="text-[15px] font-medium text-[#0F172A] dark:text-white">
+                              Blocked People
+                            </p>
+                            <p className="text-xs text-[#64748B] dark:text-[#94A3B8] tabular-nums">
+                              {blockedUsers.length === 0
+                                ? 'No blocked accounts'
+                                : `${blockedUsers.length} blocked ${
+                                    blockedUsers.length === 1 ? 'account' : 'accounts'
+                                  }`}
                             </p>
                           </div>
                         </div>
@@ -2709,6 +2743,82 @@ export function SettingsView({
                   <span>{busy ? 'Saving...' : 'Save Privacy Settings'}</span>
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* ===================================================== */}
+          {/* VIEW 3B: BLOCKED PEOPLE (REAL-TIME FIRESTORE BLOCKS)  */}
+          {/* ===================================================== */}
+          {section === 'blocked-people' && (
+            <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-5 sm:p-6 space-y-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+              <div>
+                <h1 className="text-xl font-display font-bold text-[#0F172A] dark:text-white">
+                  Blocked People
+                </h1>
+                <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-0.5">
+                  People you block can&apos;t see your profile or posts, and their content is hidden
+                  from your feed. Unblock anyone here at any time.
+                </p>
+              </div>
+
+              {blockedUsers.length === 0 ? (
+                <div className="py-10 text-center space-y-2 rounded-2xl bg-[#F8FAFC] dark:bg-[#111318] border border-dashed border-[#E2E8F0] dark:border-[#2A303C]">
+                  <Ban className="w-7 h-7 mx-auto text-[#94A3B8]" />
+                  <p className="text-sm font-semibold text-[#0F172A] dark:text-white">
+                    No blocked people
+                  </p>
+                  <p className="text-xs text-[#64748B] dark:text-[#94A3B8] max-w-xs mx-auto">
+                    When you block someone from their profile&apos;s 3-dot menu, they will appear
+                    here.
+                  </p>
+                </div>
+              ) : (
+                <div className="divide-y divide-[#E5E8EE] dark:divide-[#252A34] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl overflow-hidden">
+                  {blockedUsers.map((item) => {
+                    const isUnblocking = unblockingUid === item.blockedUid;
+                    return (
+                      <div
+                        key={item.id}
+                        className="px-4 py-3.5 flex items-center justify-between gap-3 bg-white dark:bg-[#16191F]"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <Avatar src={item.blockedAvatar} name={item.blockedName} size="sm" />
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-[#0F172A] dark:text-white truncate">
+                              {item.blockedName}
+                            </p>
+                            <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
+                              Blocked {formatDateTime(item.createdAt)}
+                            </p>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          disabled={Boolean(unblockingUid)}
+                          onClick={async () => {
+                            if (!currentUser.uid) return;
+                            clearFeedback();
+                            setUnblockingUid(item.blockedUid);
+                            try {
+                              await unblockUserPermanent(currentUser.uid, item.blockedUid);
+                              setSaveMessage(`${item.blockedName} has been unblocked.`);
+                            } catch (err) {
+                              setErrorMessage(formatFirestoreErrorMessage(err));
+                            } finally {
+                              setUnblockingUid(null);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl bg-[#F1F5F9] dark:bg-[#232732] hover:bg-[#E2E8F0] dark:hover:bg-[#2F3545] text-xs font-semibold text-[#0F172A] dark:text-white shrink-0 disabled:opacity-50 cursor-pointer"
+                        >
+                          {isUnblocking && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                          <span>{isUnblocking ? 'Unblocking...' : 'Unblock'}</span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 

@@ -12,9 +12,11 @@ import {
   Mail,
   MapPin,
   MessageSquare,
+  MoreHorizontal,
   Pencil,
   Phone,
   Plus,
+  ShieldOff,
   Upload,
   UserCheck,
   UserMinus,
@@ -46,6 +48,7 @@ import type {
 import {Avatar, CoverImage} from './MediaImage';
 import {PostCard} from './PostCard';
 import {PostComposer} from './PostComposer';
+import {ProfileActionSheet} from './ProfileActionSheet';
 
 interface ProfileViewProps {
   profileId: number;
@@ -71,6 +74,10 @@ interface ProfileViewProps {
   onCommentAddedPost?: (postId: number, comment: CommentItem) => void;
   onCommentDeletedPost?: (postId: number, commentId: number) => void;
   onDeletePostItem?: (postId: number) => Promise<void> | void;
+  myBlockedUids?: Set<string>;
+  blockedByOthersUids?: Set<string>;
+  onOpenBlockedSettings?: () => void;
+  onGoHome?: () => void;
 }
 
 export function ProfileView({
@@ -97,6 +104,10 @@ export function ProfileView({
   onCommentAddedPost,
   onCommentDeletedPost,
   onDeletePostItem,
+  myBlockedUids,
+  blockedByOthersUids,
+  onOpenBlockedSettings,
+  onGoHome,
 }: ProfileViewProps) {
   // Edit profile state
   const [isEditing, setIsEditing] = useState(false);
@@ -118,7 +129,24 @@ export function ProfileView({
   const coverFileRef = useRef<HTMLInputElement>(null);
 
   const [profileTab, setProfileTab] = useState<'posts' | 'pages'>('posts');
+  const [actionSheetOpen, setActionSheetOpen] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
   const isOwnProfile = profileId === currentUser.id;
+
+  function showToast(msg: string) {
+    setToastMessage(msg);
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+    }, 2800);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    };
+  }, []);
 
   const profilePosts = useMemo(
     () => allPosts.filter((p) => p.user_id === profileId),
@@ -161,6 +189,7 @@ export function ProfileView({
 
   useEffect(() => {
     setIsEditing(false);
+    setActionSheetOpen(false);
     setProfileTab('posts');
     setSaveConfirmation(null);
     setSaveError(null);
@@ -352,6 +381,55 @@ export function ProfileView({
     );
   }
 
+  const isProfileSuspended =
+    !isOwnProfile && (profile.is_suspended === true || profile.status === 'suspended');
+  const isBlockedByMe = Boolean(!isOwnProfile && profile.uid && myBlockedUids?.has(profile.uid));
+  const isBlockedByThem = Boolean(
+    !isOwnProfile && profile.uid && blockedByOthersUids?.has(profile.uid),
+  );
+
+  if (isProfileSuspended || isBlockedByMe || isBlockedByThem) {
+    return (
+      <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl p-8 sm:p-10 text-center space-y-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+        <span className="w-14 h-14 mx-auto rounded-full bg-[#F1F5F9] dark:bg-[#232732] text-[#64748B] dark:text-[#94A3B8] flex items-center justify-center">
+          <ShieldOff className="w-7 h-7" />
+        </span>
+        <div className="space-y-1.5 max-w-md mx-auto">
+          <h1 className="text-xl font-display font-bold text-[#0F172A] dark:text-white">
+            This profile is unavailable
+          </h1>
+          <p className="text-sm text-[#64748B] dark:text-[#94A3B8] leading-relaxed">
+            {isProfileSuspended
+              ? 'This account has been suspended and its profile content is currently unavailable.'
+              : isBlockedByMe
+                ? 'You have blocked this person. Their profile and posts are hidden from your account.'
+                : 'This content isn’t available right now.'}
+          </p>
+        </div>
+        <div className="flex items-center justify-center gap-2.5 flex-wrap pt-1">
+          {onGoHome && (
+            <button
+              type="button"
+              onClick={onGoHome}
+              className="px-4 h-10 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] text-white text-sm font-semibold cursor-pointer"
+            >
+              Back to Home
+            </button>
+          )}
+          {isBlockedByMe && onOpenBlockedSettings && (
+            <button
+              type="button"
+              onClick={onOpenBlockedSettings}
+              className="px-4 h-10 rounded-xl bg-[#F1F5F9] dark:bg-[#232732] hover:bg-[#E2E8F0] dark:hover:bg-[#2E3442] text-[#0F172A] dark:text-white text-sm font-semibold cursor-pointer"
+            >
+              Manage Blocked People
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   const displayedCover = isEditing ? editCoverUrl : profile.cover_url;
   const displayedAvatar = isEditing ? editAvatarUrl : profile.avatar_url;
 
@@ -485,14 +563,25 @@ export function ProfileView({
             {/* Action buttons */}
             <div className="flex items-center gap-2 flex-wrap pb-1">
               {isOwnProfile ? (
-                <button
-                  type="button"
-                  onClick={() => (isEditing ? setIsEditing(false) : openEditor())}
-                  className="inline-flex items-center gap-2 px-4 h-10 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] dark:bg-[#2563EB] dark:hover:bg-[#1D4ED8] text-white text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
-                >
-                  <Pencil className="w-4 h-4" />
-                  <span>{isEditing ? 'Close Editor' : 'Edit Profile'}</span>
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => (isEditing ? setIsEditing(false) : openEditor())}
+                    className="inline-flex items-center gap-2 px-4 h-10 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] dark:bg-[#2563EB] dark:hover:bg-[#1D4ED8] text-white text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                  >
+                    <Pencil className="w-4 h-4" />
+                    <span>{isEditing ? 'Close Editor' : 'Edit Profile'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActionSheetOpen(true)}
+                    title="More profile options"
+                    aria-label="More profile options"
+                    className="w-10 h-10 rounded-xl bg-[#F0F2F5] dark:bg-[#2A2D32] hover:bg-[#E4E6EB] dark:hover:bg-[#35383E] text-[#111827] dark:text-white flex items-center justify-center transition-colors cursor-pointer"
+                  >
+                    <MoreHorizontal className="w-5 h-5" />
+                  </button>
+                </>
               ) : (
                 <>
                   {profile.friendship_status === 'none' && (
@@ -598,6 +687,16 @@ export function ProfileView({
                       </button>
                     </>
                   )}
+
+                  <button
+                    type="button"
+                    onClick={() => setActionSheetOpen(true)}
+                    title="More profile options"
+                    aria-label="More profile options"
+                    className="w-10 h-10 rounded-xl bg-[#F0F2F5] dark:bg-[#2A2D32] hover:bg-[#E4E6EB] dark:hover:bg-[#35383E] text-[#111827] dark:text-white flex items-center justify-center transition-colors cursor-pointer"
+                  >
+                    <MoreHorizontal className="w-5 h-5" />
+                  </button>
                 </>
               )}
             </div>
@@ -1084,6 +1183,32 @@ export function ProfileView({
           )}
         </div>
       </div>
+
+      {/* Facebook-style 3-Dot Bottom Sheet (Copy Link, Share, Block, Report) */}
+      <ProfileActionSheet
+        open={actionSheetOpen}
+        profile={profile}
+        currentUser={currentUser}
+        isOwnProfile={isOwnProfile}
+        shareFriends={network.friends.length > 0 ? network.friends : allUsers}
+        onClose={() => setActionSheetOpen(false)}
+        onToast={showToast}
+        onBlocked={() => {
+          onNetworkChanged();
+        }}
+      />
+
+      {/* Toast notification (e.g. "Link copied") */}
+      {toastMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-20 md:bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-full bg-[#0F172A] dark:bg-white text-white dark:text-[#0F172A] text-xs sm:text-sm font-semibold shadow-xl flex items-center gap-2"
+        >
+          <CheckCircle2 className="w-4 h-4 text-[#4ADE80] dark:text-[#16A34A] shrink-0" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
     </div>
   );
 }

@@ -17,6 +17,9 @@ export interface UserProfile {
   posts_count?: number;
   friendship_status?: 'none' | 'friends' | 'outgoing_pending' | 'incoming_pending';
   is_following?: boolean;
+  status?: 'active' | 'suspended';
+  is_suspended?: boolean;
+  report_count?: number;
 }
 
 export interface CommentItem {
@@ -41,6 +44,25 @@ export type PostReportReason =
   | 'misinformation'
   | 'inappropriate'
   | 'other';
+
+export type ProfileReportReason =
+  | 'Fake profile'
+  | 'Harassment / Bullying'
+  | 'Hate speech'
+  | 'Spam / Scam'
+  | 'Inappropriate content'
+  | 'Impersonation'
+  | 'Other';
+
+export interface BlockedUserItem {
+  id: string;
+  blockerUid: string;
+  blockedUid: string;
+  blockedUserId: number;
+  blockedName: string;
+  blockedAvatar: string;
+  createdAt: string;
+}
 
 export interface PostItem {
   id: number;
@@ -362,6 +384,7 @@ export type SettingsSection =
   | 'personal-details'
   | 'password-security'
   | 'privacy'
+  | 'blocked-people'
   | 'notifications'
   | 'appearance';
 

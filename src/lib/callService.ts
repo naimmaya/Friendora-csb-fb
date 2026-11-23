@@ -1,6 +1,7 @@
 import {
   collection,
   doc,
+  getDoc,
   onSnapshot,
   query,
   serverTimestamp,
@@ -13,17 +14,26 @@ import type {CallSessionDoc, CallType, UserProfile} from '../types';
 import {db, handleFirestoreError, OperationType} from './firebase';
 import {createNotificationPermanent, sendMessagePermanent} from './firestoreStore';
 
-const ICE_SERVERS: RTCIceServer[] = [
-  {
-    urls: [
-      'stun:stun.l.google.com:19302',
-      'stun:stun1.l.google.com:19302',
-      'stun:stun2.l.google.com:19302',
-      'stun:stun3.l.google.com:19302',
-      'stun:stun4.l.google.com:19302',
-    ],
-  },
-];
+const RTC_CONFIG: RTCConfiguration = {
+  iceServers: [
+    {
+      urls: [
+        'stun:stun.l.google.com:19302',
+        'stun:stun1.l.google.com:19302',
+        'stun:stun2.l.google.com:19302',
+        'stun:stun3.l.google.com:19302',
+        'stun:stun4.l.google.com:19302',
+      ],
+    },
+    {
+      urls: [
+        'stun:stun.services.mozilla.com',
+        'stun:global.stun.twilio.com:3478',
+      ],
+    },
+  ],
+  iceCandidatePoolSize: 10,
+};
 
 function makeId(prefix: string): string {
   const rand =
@@ -166,6 +176,9 @@ export class CallRingtoneController {
 
 /**
  * Request Camera & Microphone permissions cleanly with helpful mobile/desktop error guidance.
+ * Audio call -> { audio: true, video: false }
+ * Video call -> { audio: true, video: true }
+ * Ensures Mic ON and (for video calls) Video ON by default.
  */
 export async function requestCallMedia(
   type: CallType,
@@ -183,21 +196,49 @@ export async function requestCallMedia(
     autoGainControl: true,
   };
 
+  const ensureTracksEnabled = (stream: MediaStream) => {
+    stream.getTracks().forEach((track) => {
+      track.enabled = true;
+    });
+    return stream;
+  };
+
   try {
     if (type === 'audio') {
-      return await navigator.mediaDevices.getUserMedia({
-        audio: audioConstraints,
-        video: false,
-      });
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: audioConstraints,
+          video: false,
+        });
+        return ensureTracksEnabled(stream);
+      } catch (audioErr) {
+        const errName = audioErr instanceof Error ? audioErr.name : '';
+        if (errName === 'OverconstrainedError' || errName === 'ConstraintNotSatisfiedError') {
+          const fallback = await navigator.mediaDevices.getUserMedia({audio: true, video: false});
+          return ensureTracksEnabled(fallback);
+        }
+        throw audioErr;
+      }
     }
-    return await navigator.mediaDevices.getUserMedia({
-      audio: audioConstraints,
-      video: {
-        facingMode: {ideal: facingMode},
-        width: {ideal: 1280},
-        height: {ideal: 720},
-      },
-    });
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: audioConstraints,
+        video: {
+          facingMode: {ideal: facingMode},
+          width: {ideal: 1280},
+          height: {ideal: 720},
+        },
+      });
+      return ensureTracksEnabled(stream);
+    } catch (videoErr) {
+      const errName = videoErr instanceof Error ? videoErr.name : '';
+      if (errName === 'OverconstrainedError' || errName === 'ConstraintNotSatisfiedError') {
+        const fallback = await navigator.mediaDevices.getUserMedia({audio: true, video: true});
+        return ensureTracksEnabled(fallback);
+      }
+      throw videoErr;
+    }
   } catch (err) {
     const name = err instanceof Error ? err.name : '';
     if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
@@ -211,7 +252,8 @@ export async function requestCallMedia(
       // Fallback: if video camera missing, try audio-only so call still connects
       if (type === 'video') {
         try {
-          return await navigator.mediaDevices.getUserMedia({audio: audioConstraints, video: false});
+          const audioOnly = await navigator.mediaDevices.getUserMedia({audio: true, video: false});
+          return ensureTracksEnabled(audioOnly);
         } catch {
           throw new Error('No microphone or camera was detected on this device.');
         }
@@ -243,6 +285,7 @@ export async function switchCameraTrack(
   if (!newTrack) {
     throw new Error('Unable to switch camera on this device.');
   }
+  newTrack.enabled = true;
 
   const oldVideoTracks = currentStream.getVideoTracks();
   if (pc) {
@@ -275,12 +318,25 @@ interface CallLifecycleCallbacks {
   onError?: (message: string) => void;
 }
 
+function buildIceCandidateInit(data: Record<string, unknown>): RTCIceCandidateInit | null {
+  const candidate = String(data.candidate || '').trim();
+  if (!candidate) return null;
+  const sdpMid = typeof data.sdpMid === 'string' && data.sdpMid.length > 0 ? data.sdpMid : undefined;
+  const sdpMLineIndex = typeof data.sdpMLineIndex === 'number' ? data.sdpMLineIndex : 0;
+  return {
+    candidate,
+    sdpMLineIndex,
+    ...(sdpMid !== undefined ? {sdpMid} : {}),
+  };
+}
+
 async function addIceCandidateSafe(
   pc: RTCPeerConnection,
-  candidateInit: RTCIceCandidateInit,
+  candidateInit: RTCIceCandidateInit | null,
   pendingQueue: RTCIceCandidateInit[],
 ) {
-  if (!candidateInit.candidate) return;
+  if (!candidateInit || !candidateInit.candidate) return;
+  if (pc.signalingState === 'closed') return;
   if (!pc.remoteDescription || !pc.remoteDescription.type) {
     pendingQueue.push(candidateInit);
     return;
@@ -296,9 +352,13 @@ async function flushPendingCandidates(
   pc: RTCPeerConnection,
   pendingQueue: RTCIceCandidateInit[],
 ) {
+  if (pc.signalingState === 'closed') {
+    pendingQueue.length = 0;
+    return;
+  }
   while (pendingQueue.length > 0) {
     const item = pendingQueue.shift();
-    if (!item) continue;
+    if (!item || !item.candidate) continue;
     try {
       await pc.addIceCandidate(new RTCIceCandidate(item));
     } catch {
@@ -307,9 +367,68 @@ async function flushPendingCandidates(
   }
 }
 
+function wireRemoteTrackHandling(
+  pc: RTCPeerConnection,
+  remoteStream: MediaStream,
+  callbacks: CallLifecycleCallbacks,
+) {
+  pc.ontrack = (event) => {
+    const incomingTracks: MediaStreamTrack[] = [];
+    if (event.streams && event.streams[0]) {
+      event.streams[0].getTracks().forEach((t) => incomingTracks.push(t));
+    }
+    if (event.track && !incomingTracks.some((t) => t.id === event.track.id)) {
+      incomingTracks.push(event.track);
+    }
+
+    incomingTracks.forEach((track) => {
+      if (!remoteStream.getTracks().some((existing) => existing.id === track.id)) {
+        remoteStream.addTrack(track);
+      }
+      track.onunmute = () => {
+        callbacks.onRemoteStream(remoteStream);
+      };
+      track.onended = () => {
+        callbacks.onRemoteStream(remoteStream);
+      };
+    });
+
+    callbacks.onRemoteStream(remoteStream);
+  };
+}
+
+function wireConnectionStateHandling(
+  pc: RTCPeerConnection,
+  callbacks: CallLifecycleCallbacks,
+  isDisposed: () => boolean,
+) {
+  pc.onconnectionstatechange = () => {
+    if (isDisposed()) return;
+    callbacks.onConnectionStateChange?.(pc.connectionState);
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    if (isDisposed()) return;
+    const ice = pc.iceConnectionState;
+    if (ice === 'connected' || ice === 'completed') {
+      callbacks.onConnectionStateChange?.('connected');
+    } else if (ice === 'failed') {
+      callbacks.onConnectionStateChange?.('failed');
+      try {
+        pc.restartIce?.();
+      } catch {
+        // Ignore if unsupported
+      }
+    } else if (ice === 'disconnected') {
+      callbacks.onConnectionStateChange?.('disconnected');
+    }
+  };
+}
+
 /**
  * Caller creates a WebRTC offer, writes `calls/{callId}` to Firestore,
- * trickles ICE candidates to `callerCandidates`, and listens for receiver's answer + `calleeCandidates`.
+ * trickles ICE candidates into `calls/{callId}/candidates`, and listens for receiver's
+ * answer + receiver's ICE candidates in the exact same `calls/{callId}` room.
  */
 export async function createOutgoingCallSession(
   caller: UserProfile,
@@ -324,7 +443,7 @@ export async function createOutgoingCallSession(
 
   const callId = makeId('call');
   const participantUids: [string, string] = [caller.uid, receiver.uid];
-  const pc = new RTCPeerConnection({iceServers: ICE_SERVERS});
+  const pc = new RTCPeerConnection(RTC_CONFIG);
   const remoteStream = new MediaStream();
   const pendingRemoteIce: RTCIceCandidateInit[] = [];
   const seenRemoteIceIds = new Set<string>();
@@ -333,34 +452,19 @@ export async function createOutgoingCallSession(
   let answerApplied = false;
   let disposed = false;
 
+  // Add all local audio/video tracks to RTCPeerConnection
   localStream.getTracks().forEach((track) => {
     pc.addTrack(track, localStream);
   });
 
-  pc.ontrack = (event) => {
-    if (event.streams && event.streams[0]) {
-      event.streams[0].getTracks().forEach((t) => {
-        if (!remoteStream.getTracks().some((existing) => existing.id === t.id)) {
-          remoteStream.addTrack(t);
-        }
-      });
-    } else if (event.track) {
-      if (!remoteStream.getTracks().some((existing) => existing.id === event.track.id)) {
-        remoteStream.addTrack(event.track);
-      }
-    }
-    callbacks.onRemoteStream(remoteStream);
-  };
-
-  pc.onconnectionstatechange = () => {
-    callbacks.onConnectionStateChange?.(pc.connectionState);
-  };
+  wireRemoteTrackHandling(pc, remoteStream, callbacks);
+  wireConnectionStateHandling(pc, callbacks, () => disposed);
 
   const writeLocalIce = async (cand: RTCIceCandidate) => {
     if (disposed || !cand.candidate) return;
     const candId = makeId('ice');
     try {
-      await setDoc(doc(db, 'calls', callId, 'callerCandidates', candId), {
+      await setDoc(doc(db, 'calls', callId, 'candidates', candId), {
         senderUid: caller.uid!,
         participantUids,
         candidate: clamp(cand.candidate, 4096),
@@ -433,7 +537,7 @@ export async function createOutgoingCallSession(
     handleFirestoreError(error, OperationType.CREATE, `calls/${callId}`);
   }
 
-  // Flush any ICE candidates collected while call doc was being written
+  // Flush any ICE candidates collected while calls/{callId} was being created
   for (const cand of queuedLocalCandidates) {
     void writeLocalIce(cand);
   }
@@ -447,6 +551,7 @@ export async function createOutgoingCallSession(
     message: `${caller.name} started a ${type} call with you.`,
   }).catch(() => {});
 
+  // Listen for receiver's answer SDP & call status changes on calls/{callId}
   const unsubCall = onSnapshot(
     doc(db, 'calls', callId),
     async (snap) => {
@@ -463,10 +568,12 @@ export async function createOutgoingCallSession(
       ) {
         answerApplied = true;
         try {
-          await pc.setRemoteDescription(
-            new RTCSessionDescription({type: 'answer', sdp: data.answerSdp}),
-          );
-          await flushPendingCandidates(pc, pendingRemoteIce);
+          if (pc.signalingState !== 'closed') {
+            await pc.setRemoteDescription(
+              new RTCSessionDescription({type: 'answer', sdp: data.answerSdp}),
+            );
+            await flushPendingCandidates(pc, pendingRemoteIce);
+          }
         } catch (err) {
           callbacks.onError?.(
             err instanceof Error ? err.message : 'Failed to connect media stream.',
@@ -481,27 +588,28 @@ export async function createOutgoingCallSession(
     },
   );
 
-  const unsubCalleeIce = onSnapshot(
+  // Listen for receiver's ICE candidates in calls/{callId}/candidates
+  const unsubCandidates = onSnapshot(
     query(
-      collection(db, 'calls', callId, 'calleeCandidates'),
+      collection(db, 'calls', callId, 'candidates'),
       where('participantUids', 'array-contains', caller.uid),
     ),
     (snap) => {
       if (disposed) return;
       snap.docChanges().forEach((change) => {
         if (change.type !== 'added' || seenRemoteIceIds.has(change.doc.id)) return;
-        seenRemoteIceIds.add(change.doc.id);
         const d = change.doc.data();
-        void addIceCandidateSafe(
-          pc,
-          {
-            candidate: String(d.candidate || ''),
-            sdpMid: typeof d.sdpMid === 'string' ? d.sdpMid : '',
-            sdpMLineIndex: typeof d.sdpMLineIndex === 'number' ? d.sdpMLineIndex : 0,
-          },
-          pendingRemoteIce,
-        );
+        if (d.senderUid === caller.uid) return; // Ignore own candidates
+        seenRemoteIceIds.add(change.doc.id);
+        void addIceCandidateSafe(pc, buildIceCandidateInit(d), pendingRemoteIce);
       });
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, `calls/${callId}/candidates`);
+      } catch {
+        // Logged
+      }
     },
   );
 
@@ -509,11 +617,12 @@ export async function createOutgoingCallSession(
     if (disposed) return;
     disposed = true;
     unsubCall();
-    unsubCalleeIce();
+    unsubCandidates();
     try {
       pc.ontrack = null;
       pc.onicecandidate = null;
       pc.onconnectionstatechange = null;
+      pc.oniceconnectionstatechange = null;
       pc.close();
     } catch {
       // Ignore
@@ -524,48 +633,61 @@ export async function createOutgoingCallSession(
 }
 
 /**
- * Receiver accepts an incoming ringing call, generates WebRTC answer SDP,
- * writes answer to `calls/{callId}`, trickles ICE to `calleeCandidates`,
- * and listens to `callerCandidates` & remote hangup.
+ * Receiver accepts an incoming ringing call in the exact same `calls/{callId}` room:
+ * sets remote offer, subscribes to caller's ICE candidates in `calls/{callId}/candidates`,
+ * creates WebRTC answer SDP, writes `status: "accepted"` + `answerSdp` to `calls/{callId}`,
+ * and trickles local ICE candidates to `calls/{callId}/candidates`.
  */
 export async function acceptIncomingCallSession(
   callDoc: CallSessionDoc,
   localStream: MediaStream,
   callbacks: CallLifecycleCallbacks,
 ): Promise<ActiveCallHandles> {
-  const pc = new RTCPeerConnection({iceServers: ICE_SERVERS});
+  // Verify latest call doc in Firestore so we have exact offerSdp and live ringing state
+  let offerSdp = callDoc.offerSdp;
+  try {
+    const latestSnap = await getDoc(doc(db, 'calls', callDoc.id));
+    if (!latestSnap.exists()) {
+      throw new Error('This call is no longer available.');
+    }
+    const latestData = latestSnap.data();
+    const latestStatus = String(latestData.status || '');
+    if (latestStatus === 'ended' || latestStatus === 'missed' || latestStatus === 'declined') {
+      throw new Error('The caller already ended this call.');
+    }
+    if (typeof latestData.offerSdp === 'string' && latestData.offerSdp.length > 0) {
+      offerSdp = latestData.offerSdp;
+    }
+  } catch (err) {
+    if (err instanceof Error && (err.message.includes('already ended') || err.message.includes('no longer available'))) {
+      throw err;
+    }
+    // Continue with cached offerSdp if transient read error
+  }
+
+  if (!offerSdp) {
+    throw new Error('Call offer data is missing. Please try calling again.');
+  }
+
+  const pc = new RTCPeerConnection(RTC_CONFIG);
   const remoteStream = new MediaStream();
   const pendingRemoteIce: RTCIceCandidateInit[] = [];
   const seenRemoteIceIds = new Set<string>();
   let disposed = false;
 
+  // Add all local audio/video tracks to RTCPeerConnection
   localStream.getTracks().forEach((track) => {
     pc.addTrack(track, localStream);
   });
 
-  pc.ontrack = (event) => {
-    if (event.streams && event.streams[0]) {
-      event.streams[0].getTracks().forEach((t) => {
-        if (!remoteStream.getTracks().some((existing) => existing.id === t.id)) {
-          remoteStream.addTrack(t);
-        }
-      });
-    } else if (event.track) {
-      if (!remoteStream.getTracks().some((existing) => existing.id === event.track.id)) {
-        remoteStream.addTrack(event.track);
-      }
-    }
-    callbacks.onRemoteStream(remoteStream);
-  };
+  wireRemoteTrackHandling(pc, remoteStream, callbacks);
+  wireConnectionStateHandling(pc, callbacks, () => disposed);
 
-  pc.onconnectionstatechange = () => {
-    callbacks.onConnectionStateChange?.(pc.connectionState);
-  };
-
+  // Send receiver's ICE candidates to calls/{callId}/candidates
   pc.onicecandidate = (event) => {
     if (disposed || !event.candidate || !event.candidate.candidate) return;
     const candId = makeId('ice');
-    void setDoc(doc(db, 'calls', callDoc.id, 'calleeCandidates', candId), {
+    void setDoc(doc(db, 'calls', callDoc.id, 'candidates', candId), {
       senderUid: callDoc.receiverId,
       participantUids: callDoc.participantUids,
       candidate: clamp(event.candidate.candidate, 4096),
@@ -576,13 +698,41 @@ export async function acceptIncomingCallSession(
     }).catch(() => {});
   };
 
+  // Apply caller's SDP offer first
   await pc.setRemoteDescription(
-    new RTCSessionDescription({type: 'offer', sdp: callDoc.offerSdp}),
+    new RTCSessionDescription({type: 'offer', sdp: offerSdp}),
   );
 
+  // Subscribe to caller's ICE candidates in calls/{callId}/candidates right away
+  const unsubCandidates = onSnapshot(
+    query(
+      collection(db, 'calls', callDoc.id, 'candidates'),
+      where('participantUids', 'array-contains', callDoc.receiverId),
+    ),
+    (snap) => {
+      if (disposed) return;
+      snap.docChanges().forEach((change) => {
+        if (change.type !== 'added' || seenRemoteIceIds.has(change.doc.id)) return;
+        const d = change.doc.data();
+        if (d.senderUid === callDoc.receiverId) return; // Ignore own candidates
+        seenRemoteIceIds.add(change.doc.id);
+        void addIceCandidateSafe(pc, buildIceCandidateInit(d), pendingRemoteIce);
+      });
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, `calls/${callDoc.id}/candidates`);
+      } catch {
+        // Logged
+      }
+    },
+  );
+
+  // Create WebRTC answer SDP and set local description (starts local ICE gathering)
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
 
+  // Save answer + status = "accepted" in Firestore calls/{callId}
   try {
     await updateDoc(doc(db, 'calls', callDoc.id), {
       status: 'accepted',
@@ -591,34 +741,13 @@ export async function acceptIncomingCallSession(
       updatedAt: serverTimestamp(),
     });
   } catch (error) {
+    disposed = true;
+    unsubCandidates();
     pc.close();
     handleFirestoreError(error, OperationType.UPDATE, `calls/${callDoc.id}`);
   }
 
-  const unsubCallerIce = onSnapshot(
-    query(
-      collection(db, 'calls', callDoc.id, 'callerCandidates'),
-      where('participantUids', 'array-contains', callDoc.receiverId),
-    ),
-    (snap) => {
-      if (disposed) return;
-      snap.docChanges().forEach((change) => {
-        if (change.type !== 'added' || seenRemoteIceIds.has(change.doc.id)) return;
-        seenRemoteIceIds.add(change.doc.id);
-        const d = change.doc.data();
-        void addIceCandidateSafe(
-          pc,
-          {
-            candidate: String(d.candidate || ''),
-            sdpMid: typeof d.sdpMid === 'string' ? d.sdpMid : '',
-            sdpMLineIndex: typeof d.sdpMLineIndex === 'number' ? d.sdpMLineIndex : 0,
-          },
-          pendingRemoteIce,
-        );
-      });
-    },
-  );
-
+  // Listen to calls/{callId} so if caller ends the call, receiver closes cleanly
   const unsubCall = onSnapshot(doc(db, 'calls', callDoc.id), (snap) => {
     if (!snap.exists() || disposed) return;
     const status = snap.data().status as CallSessionDoc['status'];
@@ -628,12 +757,13 @@ export async function acceptIncomingCallSession(
   const cleanup = () => {
     if (disposed) return;
     disposed = true;
-    unsubCallerIce();
+    unsubCandidates();
     unsubCall();
     try {
       pc.ontrack = null;
       pc.onicecandidate = null;
       pc.onconnectionstatechange = null;
+      pc.oniceconnectionstatechange = null;
       pc.close();
     } catch {
       // Ignore
@@ -673,7 +803,8 @@ export async function declineIncomingCallDoc(
 }
 
 /**
- * End an active or ringing call in Firestore and write a Messenger-style call log message in chat.
+ * End an active or ringing call in Firestore (`status = "ended"`, or `"missed"` on timeout)
+ * and write a Messenger-style call log message in chat.
  */
 export async function endCallInFirestore(
   callDoc: CallSessionDoc,
@@ -681,8 +812,9 @@ export async function endCallInFirestore(
   durationSec: number,
   wasAccepted: boolean,
   writeChatLog = true,
+  markAsMissed = false,
 ): Promise<void> {
-  const nextStatus: 'ended' | 'missed' = wasAccepted ? 'ended' : 'missed';
+  const nextStatus: 'ended' | 'missed' = markAsMissed ? 'missed' : 'ended';
   const safeDuration = wasAccepted ? Math.max(1, Math.round(durationSec)) : 0;
 
   try {

@@ -8,8 +8,10 @@ import {
   Menu,
   MessageSquare,
   Moon,
+  RefreshCw,
   Search,
   Settings,
+  ShieldAlert,
   Sun,
   Users,
   X,
@@ -61,10 +63,13 @@ import {
   markNotificationReadPermanent,
   sendMessagePermanent,
   setTypingStatePermanent,
+  subscribeBlockedByOthersPermanent,
   subscribeHiddenPostsPermanent,
   subscribeMessagesPermanent,
+  subscribeMyBlocksPermanent,
   subscribeNetworkPermanent,
   subscribeNotificationsPermanent,
+  subscribeOwnUserStatusPermanent,
   subscribePostsPermanent,
   subscribePresencePermanent,
   subscribePublicUsers,
@@ -85,6 +90,7 @@ import {subscribePagesPermanent} from './lib/pageService';
 import type {
   AppView,
   AuthView,
+  BlockedUserItem,
   CallSessionDoc,
   CallType,
   ChatGroupDoc,
@@ -132,8 +138,15 @@ function parseLocation() {
   else if (path === '/profile') appView = 'profile';
   else if (path.startsWith('/profile/')) {
     appView = 'profile';
-    const parsed = Number(path.slice('/profile/'.length));
-    if (Number.isFinite(parsed) && parsed > 0) profileId = parsed;
+    const rawSegment = decodeURIComponent(window.location.pathname.slice('/profile/'.length)).trim();
+    if (rawSegment) {
+      const parsed = Number(rawSegment);
+      if (Number.isFinite(parsed) && parsed > 0 && /^\d+$/.test(rawSegment)) {
+        profileId = parsed;
+      } else {
+        profileId = uidToNumericId(rawSegment);
+      }
+    }
   }
 
   const pageIdParam = params.get('page') || null;
@@ -178,6 +191,9 @@ export default function App() {
   const [loadingPosts, setLoadingPosts] = useState(false);
   const [savedPostDocIds, setSavedPostDocIds] = useState<Set<string>>(() => new Set());
   const [hiddenPostDocIds, setHiddenPostDocIds] = useState<Set<string>>(() => new Set());
+  const [myBlockedUsers, setMyBlockedUsers] = useState<BlockedUserItem[]>([]);
+  const [blockedByOthersUids, setBlockedByOthersUids] = useState<Set<string>>(() => new Set());
+  const [checkingSuspension, setCheckingSuspension] = useState(false);
 
   // Network, notifications, chat, presence, typing, groups & pages state (all synced from Cloud Firestore)
   const [network, setNetwork] = useState<NetworkData>({
@@ -204,9 +220,13 @@ export default function App() {
     type: CallType;
   } | null>(null);
   const [incomingCall, setIncomingCall] = useState<CallSessionDoc | null>(null);
+  const [acceptedCall, setAcceptedCall] = useState<CallSessionDoc | null>(null);
   const [activeGroupCallsList, setActiveGroupCallsList] = useState<GroupCallDoc[]>([]);
   const [activeGroupCall, setActiveGroupCall] = useState<GroupCallDoc | null>(null);
   const [declinedGroupCallIds, setDeclinedGroupCallIds] = useState<Set<string>>(() => new Set());
+
+  const hasActiveCallRef = useRef(false);
+  hasActiveCallRef.current = Boolean(outgoingCallTarget || acceptedCall);
 
   const currentUserRef = useRef<UserProfile | null>(null);
   currentUserRef.current = currentUser;
@@ -401,6 +421,8 @@ export default function App() {
       setPosts([]);
       setSavedPostDocIds(new Set());
       setHiddenPostDocIds(new Set());
+      setMyBlockedUsers([]);
+      setBlockedByOthersUids(new Set());
       setNotifications([]);
       setIncomingCall(null);
       setPresenceByUid({});
@@ -477,6 +499,27 @@ export default function App() {
       },
     );
 
+    const unsubOwnStatus = subscribeOwnUserStatusPermanent(myUid, (patch) => {
+      setCurrentUser((prev) => {
+        if (!prev || prev.uid !== myUid) return prev;
+        if (
+          prev.status === patch.status &&
+          prev.is_suspended === patch.is_suspended &&
+          prev.report_count === patch.report_count
+        ) {
+          return prev;
+        }
+        return {
+          ...prev,
+          status: patch.status,
+          is_suspended: patch.is_suspended,
+          report_count: patch.report_count,
+        };
+      });
+    });
+
+    const unsubMyBlocks = subscribeMyBlocksPermanent(myUid, setMyBlockedUsers);
+    const unsubBlockedByOthers = subscribeBlockedByOthersPermanent(myUid, setBlockedByOthersUids);
     const unsubSaved = subscribeSavedPostsPermanent(myUid, setSavedPostDocIds);
     const unsubHidden = subscribeHiddenPostsPermanent(myUid, setHiddenPostDocIds);
     const unsubPresence = subscribePresencePermanent(setPresenceByUid);
@@ -487,10 +530,12 @@ export default function App() {
     });
 
     const unsubCalls = subscribeIncomingCalls(myUid, (call) => {
-      setIncomingCall((prev) => {
-        if (outgoingCallTarget && call) return prev;
-        return call;
-      });
+      // Never clear or override while user is already in an active outgoing or accepted call
+      if (hasActiveCallRef.current) {
+        setIncomingCall(null);
+        return;
+      }
+      setIncomingCall(call);
     });
 
     const unsubGroups = subscribeGroupsPermanent(myUid, (loadedGroups) => {
@@ -515,6 +560,9 @@ export default function App() {
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('beforeunload', handleBeforeUnload);
       unsubUsers();
+      unsubOwnStatus();
+      unsubMyBlocks();
+      unsubBlockedByOthers();
       unsubPosts();
       unsubSaved();
       unsubHidden();
@@ -575,13 +623,61 @@ export default function App() {
     }
   }, [allUsers, activeChatPeer]);
 
-  // Decorated posts with real Firestore saved_by_me status
+  // Real-time blocked & suspended UID sets (hides blocked/suspended people & posts instantly)
+  const myBlockedUids = useMemo(
+    () => new Set(myBlockedUsers.map((b) => b.blockedUid)),
+    [myBlockedUsers],
+  );
+
+  const hiddenUserUids = useMemo(() => {
+    const set = new Set<string>();
+    for (const uid of myBlockedUids) set.add(uid);
+    for (const uid of blockedByOthersUids) set.add(uid);
+    for (const u of allUsers) {
+      if (u.uid && u.uid !== currentUser?.uid && (u.is_suspended || u.status === 'suspended')) {
+        set.add(u.uid);
+      }
+    }
+    return set;
+  }, [myBlockedUids, blockedByOthersUids, allUsers, currentUser?.uid]);
+
+  const visibleUsers = useMemo(
+    () => allUsers.filter((u) => !u.uid || !hiddenUserUids.has(u.uid)),
+    [allUsers, hiddenUserUids],
+  );
+
+  const filteredNetwork = useMemo<NetworkData>(() => {
+    const allow = (u: UserProfile) => !u.uid || !hiddenUserUids.has(u.uid);
+    return {
+      friends: network.friends.filter(allow),
+      incomingRequests: network.incomingRequests.filter(allow),
+      outgoingRequests: network.outgoingRequests.filter(allow),
+      suggestions: network.suggestions.filter(allow),
+      followingIds: network.followingIds,
+    };
+  }, [network, hiddenUserUids]);
+
+  const filteredConversations = useMemo(
+    () => conversations.filter((c) => !c.user.uid || !hiddenUserUids.has(c.user.uid)),
+    [conversations, hiddenUserUids],
+  );
+
+  useEffect(() => {
+    if (activeChatPeer?.uid && hiddenUserUids.has(activeChatPeer.uid)) {
+      setActiveChatPeer(null);
+      setFloatingChatOpen(false);
+    }
+  }, [activeChatPeer, hiddenUserUids]);
+
+  // Decorated posts with real Firestore saved_by_me status (excludes blocked/suspended authors)
   const decoratedPosts = useMemo(() => {
-    return posts.map((p) => ({
-      ...p,
-      saved_by_me: Boolean(p.docId && savedPostDocIds.has(p.docId)),
-    }));
-  }, [posts, savedPostDocIds]);
+    return posts
+      .filter((p) => !p.author_uid || !hiddenUserUids.has(p.author_uid))
+      .map((p) => ({
+        ...p,
+        saved_by_me: Boolean(p.docId && savedPostDocIds.has(p.docId)),
+      }));
+  }, [posts, savedPostDocIds, hiddenUserUids]);
 
   // Filtered feed posts (excludes posts the user explicitly hid in Firestore)
   const visiblePosts = useMemo(() => {
@@ -589,8 +685,8 @@ export default function App() {
     if (feedFilter === 'all' || !currentUser) return notHidden;
     const allowedIds = new Set<number>([
       currentUser.id,
-      ...network.friends.map((f) => f.id),
-      ...network.followingIds,
+      ...filteredNetwork.friends.map((f) => f.id),
+      ...filteredNetwork.followingIds,
     ]);
     const followedPageIds = new Set<string>(
       pages
@@ -606,8 +702,8 @@ export default function App() {
     hiddenPostDocIds,
     feedFilter,
     currentUser,
-    network.friends,
-    network.followingIds,
+    filteredNetwork.friends,
+    filteredNetwork.followingIds,
     pages,
   ]);
 
@@ -691,6 +787,7 @@ export default function App() {
     setActiveChatPeer(null);
     setOutgoingCallTarget(null);
     setIncomingCall(null);
+    setAcceptedCall(null);
     setActiveGroupCall(null);
     setMessagesByPeer({});
     window.history.replaceState({}, '', '/login');
@@ -854,6 +951,7 @@ export default function App() {
       return;
     }
     setIncomingCall(null);
+    setAcceptedCall(null);
     setOutgoingCallTarget({peer, type});
   }
 
@@ -934,24 +1032,94 @@ export default function App() {
     );
   }
 
+  // Mandatory Suspended Account Gate (auto-triggered after 10 unique reports; Admin can un-suspend in Firebase)
+  if (currentUser.is_suspended || currentUser.status === 'suspended') {
+    return (
+      <div className="min-h-screen bg-[#F4F6F9] dark:bg-[#0E1014] flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-3xl p-7 sm:p-8 text-center space-y-5 shadow-xl">
+          <span className="w-16 h-16 mx-auto rounded-full bg-[#FEF2F2] dark:bg-[#3B181A] text-[#DC2626] dark:text-[#F87171] flex items-center justify-center">
+            <ShieldAlert className="w-8 h-8" />
+          </span>
+
+          <div className="space-y-2">
+            <h1 className="text-xl sm:text-2xl font-display font-bold text-[#0F172A] dark:text-white">
+              Account Suspended
+            </h1>
+            <p className="text-sm font-medium text-[#DC2626] dark:text-[#FCA5A5]">
+              Your account is suspended due to multiple reports
+            </p>
+            <p className="text-xs text-[#64748B] dark:text-[#94A3B8] leading-relaxed">
+              Your profile and posts are currently hidden from other members. If an administrator
+              reviews and restores your account, click Refresh Status below to continue.
+            </p>
+          </div>
+
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5 pt-2">
+            <button
+              type="button"
+              disabled={checkingSuspension}
+              onClick={async () => {
+                const fbUser = auth.currentUser;
+                if (!fbUser) return;
+                setCheckingSuspension(true);
+                try {
+                  const fresh = await ensureAndLoadUserProfile(fbUser);
+                  setCurrentUser(fresh);
+                } catch {
+                  // Ignore
+                } finally {
+                  setCheckingSuspension(false);
+                }
+              }}
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 h-10 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] text-white text-sm font-semibold disabled:opacity-60 cursor-pointer"
+            >
+              <RefreshCw className={`w-4 h-4 ${checkingSuspension ? 'animate-spin' : ''}`} />
+              <span>{checkingSuspension ? 'Checking...' : 'Refresh Status'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 h-10 rounded-xl bg-[#F1F5F9] dark:bg-[#232732] hover:bg-[#E2E8F0] dark:hover:bg-[#2E3442] text-[#0F172A] dark:text-white text-sm font-semibold cursor-pointer"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>Sign Out</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const unreadNotifications = notifications.filter((n) => !n.read).length;
   const unreadMessages = conversations.reduce((sum, c) => sum + c.unread_count, 0);
   const pendingRequests = network.incomingRequests.length;
   const resolvedProfileId = activeProfileId ?? currentUser.id;
   const onlineSet = new Set(onlineUserIds);
-  const callOverlayVisible = Boolean(outgoingCallTarget || incomingCall);
+  const activeIncomingOrAcceptedCall = acceptedCall || incomingCall;
+  const callOverlayVisible = Boolean(outgoingCallTarget || activeIncomingOrAcceptedCall);
+  const callOverlayKey = outgoingCallTarget
+    ? `out_${outgoingCallTarget.peer.uid || outgoingCallTarget.peer.id}_${outgoingCallTarget.type}`
+    : activeIncomingOrAcceptedCall
+      ? `in_${activeIncomingOrAcceptedCall.id}`
+      : 'idle';
 
   return (
     <div className="min-h-screen bg-[#F4F6F9] dark:bg-[#0E1014] text-[#0F172A] dark:text-[#F1F5F9] pb-16 md:pb-8">
       {/* Real-time Facebook Messenger-style 1-on-1 Audio & Video Call Overlay */}
       {callOverlayVisible && (
         <CallOverlay
+          key={callOverlayKey}
           currentUser={currentUser}
           outgoingTarget={outgoingCallTarget}
-          incomingCall={incomingCall}
+          incomingCall={activeIncomingOrAcceptedCall}
+          onAcceptCall={(call) => {
+            setAcceptedCall(call);
+            setIncomingCall(null);
+          }}
           inviteCandidates={network.friends.length > 0 ? network.friends : allUsers}
           onCloseCall={() => {
             setOutgoingCallTarget(null);
+            setAcceptedCall(null);
             setIncomingCall(null);
           }}
         />
@@ -1411,9 +1579,9 @@ export default function App() {
             {appView === 'search' && (
               <SearchPageView
                 currentUser={currentUser}
-                allUsers={allUsers}
+                allUsers={visibleUsers}
                 pages={pages}
-                network={network}
+                network={filteredNetwork}
                 onlineUserIds={onlineUserIds}
                 onBack={() => navigateApp('home')}
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
@@ -1430,7 +1598,14 @@ export default function App() {
                 allUsers={allUsers}
                 allPosts={decoratedPosts}
                 pages={pages}
-                network={network}
+                network={filteredNetwork}
+                myBlockedUids={myBlockedUids}
+                blockedByOthersUids={blockedByOthersUids}
+                onOpenBlockedSettings={() => {
+                  setSettingsSection('blocked-people');
+                  navigateApp('settings');
+                }}
+                onGoHome={() => navigateApp('home')}
                 onUserUpdated={handleUserUpdated}
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
                 onOpenPage={handleOpenPage}
@@ -1465,7 +1640,7 @@ export default function App() {
             {appView === 'friends' && (
               <FriendsView
                 currentUser={currentUser}
-                network={network}
+                network={filteredNetwork}
                 onlineUserIds={onlineUserIds}
                 onRefresh={() => {}}
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
@@ -1478,9 +1653,9 @@ export default function App() {
             {(appView === 'messages' || appView === 'groups') && (
               <MessagesPage
                 currentUser={currentUser}
-                allUsers={allUsers}
-                friends={network.friends}
-                conversations={conversations}
+                allUsers={visibleUsers}
+                friends={filteredNetwork.friends}
+                conversations={filteredConversations}
                 groups={groups}
                 activePeer={activeChatPeer}
                 activeGroupId={activeGroupId}
@@ -1548,6 +1723,7 @@ export default function App() {
                   navigateApp('pages');
                 }}
                 onUserUpdated={handleUserUpdated}
+                blockedUsers={myBlockedUsers}
               />
             )}
 
@@ -1682,7 +1858,7 @@ export default function App() {
           {appView !== 'messages' && appView !== 'groups' && (
             <aside className="hidden xl:block w-[300px] shrink-0 sticky top-[5.25rem]">
               <RightRailPanel
-                conversations={conversations}
+                conversations={filteredConversations}
                 notifications={notifications}
                 onlineUserIds={onlineUserIds}
                 onSelectChat={handleOpenChat}
@@ -1710,7 +1886,7 @@ export default function App() {
             onOpenProfile={(uid) => navigateApp('profile', uid)}
             onStartCall={handleStartCall}
             onClose={() => setFloatingChatOpen(false)}
-            forwardUsers={allUsers}
+            forwardUsers={visibleUsers}
             forwardGroups={groups}
           />
         </div>

@@ -15,6 +15,7 @@ import {
   type Unsubscribe,
 } from 'firebase/firestore';
 import type {
+  BlockedUserItem,
   ChatMessage,
   ChatMessageType,
   CommentItem,
@@ -24,6 +25,7 @@ import type {
   PostItem,
   PostReportReason,
   PresenceRecord,
+  ProfileReportReason,
   ReactionType,
   SocialPageDoc,
   UserProfile,
@@ -143,6 +145,7 @@ export async function compressImageForFirestore(
 }
 
 export function mapPublicUserDoc(uid: string, data: Record<string, unknown>): UserProfile {
+  const isSuspended = data.isSuspended === true || data.status === 'suspended';
   return {
     id: uidToNumericId(uid),
     uid,
@@ -155,6 +158,9 @@ export function mapPublicUserDoc(uid: string, data: Record<string, unknown>): Us
     avatar_url: typeof data.avatarUrl === 'string' ? data.avatarUrl : '',
     cover_url: typeof data.coverUrl === 'string' ? data.coverUrl : '',
     created_at: tsToIso(data.createdAt),
+    status: isSuspended ? 'suspended' : 'active',
+    is_suspended: isSuspended,
+    report_count: typeof data.reportCount === 'number' ? data.reportCount : 0,
   };
 }
 
@@ -215,16 +221,21 @@ export async function ensureAndLoadUserProfile(
     cover_url: existing.cover_url || '',
     date_of_birth: existing.date_of_birth || '',
     created_at: existing.created_at || new Date().toISOString(),
+    status: existing.is_suspended || existing.status === 'suspended' ? 'suspended' : 'active',
+    is_suspended: Boolean(existing.is_suspended || existing.status === 'suspended'),
+    report_count: existing.report_count ?? 0,
   };
 
-  // Ensure legacy docs created before `visibility: 'public'` are upgraded silently
-  try {
-    const pubSnap = await getDoc(doc(db, 'users', fbUser.uid));
-    if (pubSnap.exists() && pubSnap.data()?.visibility !== 'public') {
-      await syncUserProfileToFirestore(fbUser, loaded, authMethod);
+  // Ensure legacy docs created before `visibility: 'public'` are upgraded silently (skip if suspended)
+  if (!loaded.is_suspended) {
+    try {
+      const pubSnap = await getDoc(doc(db, 'users', fbUser.uid));
+      if (pubSnap.exists() && pubSnap.data()?.visibility !== 'public') {
+        await syncUserProfileToFirestore(fbUser, loaded, authMethod);
+      }
+    } catch {
+      // Non-fatal
     }
-  } catch {
-    // Non-fatal
   }
 
   return loaded;
@@ -1788,3 +1799,275 @@ export async function markAllNotificationsReadPermanent(docIds: string[]): Promi
     // Non-fatal
   }
 }
+
+export const PROFILE_SUSPEND_REPORT_THRESHOLD = 10;
+
+/**
+ * Subscribe directly to the signed-in user's own `users/{uid}` doc in real time
+ * so auto-suspension or Admin un-suspension takes effect instantly.
+ */
+export function subscribeOwnUserStatusPermanent(
+  uid: string,
+  onUpdate: (patch: {
+    status: 'active' | 'suspended';
+    is_suspended: boolean;
+    report_count: number;
+  }) => void,
+): Unsubscribe {
+  return onSnapshot(
+    doc(db, 'users', uid),
+    (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      const isSuspended = data.isSuspended === true || data.status === 'suspended';
+      onUpdate({
+        status: isSuspended ? 'suspended' : 'active',
+        is_suspended: isSuspended,
+        report_count: typeof data.reportCount === 'number' ? data.reportCount : 0,
+      });
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.GET, `users/${uid}`);
+      } catch {
+        // Logged
+      }
+    },
+  );
+}
+
+export function makeProfileReportDocId(reportedUserId: string, reporterUserId: string): string {
+  return `prof_${reportedUserId}_${reporterUserId}`;
+}
+
+export async function hasReportedProfilePermanent(
+  reportedUserId: string,
+  reporterUserId: string,
+): Promise<boolean> {
+  if (!reportedUserId || !reporterUserId || reportedUserId === reporterUserId) return false;
+  const reportId = makeProfileReportDocId(reportedUserId, reporterUserId);
+  try {
+    const snap = await getDoc(doc(db, 'reports', reportId));
+    return snap.exists();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Submit a real Firestore profile report (`reports/{reportId}`) and atomically increment
+ * the unique reporter list on `users/{reportedUserId}`. When 10 distinct users report
+ * the same profile, `users/{reportedUserId}` is automatically updated to
+ * `status = "suspended"` and `isSuspended = true`.
+ */
+export async function submitProfileReportPermanent(params: {
+  reportedUserId: string;
+  reporterUserId: string;
+  reason: ProfileReportReason;
+  details?: string;
+}): Promise<{reportCount: number; suspended: boolean}> {
+  const {reportedUserId, reporterUserId, reason} = params;
+  if (!reportedUserId || !reporterUserId) {
+    throw new Error('Missing account information.');
+  }
+  if (reportedUserId === reporterUserId) {
+    throw new Error('You cannot report your own profile.');
+  }
+
+  const reportId = makeProfileReportDocId(reportedUserId, reporterUserId);
+  const reportRef = doc(db, 'reports', reportId);
+  const userRef = doc(db, 'users', reportedUserId);
+
+  try {
+    const [existingReport, targetSnap] = await Promise.all([
+      getDoc(reportRef),
+      getDoc(userRef),
+    ]);
+
+    if (existingReport.exists()) {
+      throw new Error('You have already reported this profile.');
+    }
+    if (!targetSnap.exists()) {
+      throw new Error('This profile could not be found.');
+    }
+
+    const targetData = targetSnap.data() || {};
+    const existingReporters: string[] = Array.isArray(targetData.reportedByUids)
+      ? targetData.reportedByUids.filter((u): u is string => typeof u === 'string' && u.length > 0)
+      : [];
+
+    if (existingReporters.includes(reporterUserId)) {
+      throw new Error('You have already reported this profile.');
+    }
+
+    const nextReporters = [...existingReporters, reporterUserId];
+    const nextCount = nextReporters.length;
+    const shouldSuspend = nextCount >= PROFILE_SUSPEND_REPORT_THRESHOLD;
+
+    const batch = writeBatch(db);
+    batch.set(reportRef, {
+      id: reportId,
+      reportType: 'profile',
+      reportedUserId,
+      reporterUserId,
+      reason,
+      details: clamp(params.details, 500),
+      status: 'pending',
+      time: serverTimestamp(),
+    });
+    batch.update(userRef, {
+      reportedByUids: nextReporters,
+      reportCount: nextCount,
+      isSuspended: shouldSuspend,
+      status: shouldSuspend ? 'suspended' : 'active',
+      updatedAt: serverTimestamp(),
+    });
+
+    await batch.commit();
+    return {reportCount: nextCount, suspended: shouldSuspend};
+  } catch (error) {
+    if (error instanceof Error && /already reported|own profile|could not be found/i.test(error.message)) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, `reports/${reportId}`);
+  }
+}
+
+/**
+ * Subscribe in real time to the list of people the current user has blocked (`blocks` collection).
+ */
+export function subscribeMyBlocksPermanent(
+  currentUid: string,
+  onUpdate: (items: BlockedUserItem[]) => void,
+  onError?: (err: unknown) => void,
+): Unsubscribe {
+  const q = query(collection(db, 'blocks'), where('blockerUid', '==', currentUid));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list: BlockedUserItem[] = snap.docs
+        .map((d) => {
+          const data = d.data();
+          const blockedUid = String(data.blockedUid || '');
+          return {
+            id: d.id,
+            blockerUid: String(data.blockerUid || currentUid),
+            blockedUid,
+            blockedUserId: uidToNumericId(blockedUid),
+            blockedName: String(data.blockedName || 'Verve Member'),
+            blockedAvatar: typeof data.blockedAvatar === 'string' ? data.blockedAvatar : '',
+            createdAt: tsToIso(data.createdAt),
+          };
+        })
+        .filter((item) => Boolean(item.blockedUid))
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      onUpdate(list);
+    },
+    (error) => {
+      if (onError) onError(error);
+      try {
+        handleFirestoreError(error, OperationType.LIST, 'blocks');
+      } catch {
+        // Logged
+      }
+    },
+  );
+}
+
+/**
+ * Subscribe in real time to UIDs of users who have blocked the current user,
+ * so their profile and posts immediately appear unavailable.
+ */
+export function subscribeBlockedByOthersPermanent(
+  currentUid: string,
+  onUpdate: (blockerUids: Set<string>) => void,
+): Unsubscribe {
+  const q = query(collection(db, 'blocks'), where('blockedUid', '==', currentUid));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const uids = new Set<string>();
+      for (const d of snap.docs) {
+        const blockerUid = d.data()?.blockerUid;
+        if (typeof blockerUid === 'string' && blockerUid) {
+          uids.add(blockerUid);
+        }
+      }
+      onUpdate(uids);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, 'blocks');
+      } catch {
+        // Logged
+      }
+    },
+  );
+}
+
+/**
+ * Block a user in Cloud Firestore (`blocks/{blockerUid}_{blockedUid}`) and clean up
+ * any existing friendship or follow relationship between the two accounts.
+ */
+export async function blockUserPermanent(
+  currentUser: UserProfile,
+  targetUser: UserProfile,
+): Promise<void> {
+  if (!currentUser.uid || !targetUser.uid) {
+    throw new Error('Cannot block this account right now.');
+  }
+  if (currentUser.uid === targetUser.uid) {
+    throw new Error('You cannot block yourself.');
+  }
+
+  const blockId = `${currentUser.uid}_${targetUser.uid}`;
+  const blockRef = doc(db, 'blocks', blockId);
+
+  try {
+    await setDoc(blockRef, {
+      id: blockId,
+      blockerUid: currentUser.uid,
+      blockedUid: targetUser.uid,
+      blockedName: clamp(targetUser.name, 60) || 'Verve Member',
+      blockedAvatar: clamp(targetUser.avatar_url, 450000),
+      createdAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `blocks/${blockId}`);
+  }
+
+  // Best-effort cleanup of existing friendship or follow
+  try {
+    const pairId = canonicalPairId(currentUser.uid, targetUser.uid);
+    const friendSnap = await getDoc(doc(db, 'friendships', pairId));
+    if (friendSnap.exists()) {
+      await deleteDoc(doc(db, 'friendships', pairId));
+    }
+  } catch {
+    // Non-fatal
+  }
+
+  try {
+    const followId = `${currentUser.uid}_${targetUser.uid}`;
+    const followSnap = await getDoc(doc(db, 'follows', followId));
+    if (followSnap.exists()) {
+      await deleteDoc(doc(db, 'follows', followId));
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
+export async function unblockUserPermanent(
+  currentUid: string,
+  blockedUid: string,
+): Promise<void> {
+  if (!currentUid || !blockedUid) return;
+  const blockId = `${currentUid}_${blockedUid}`;
+  try {
+    await deleteDoc(doc(db, 'blocks', blockId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `blocks/${blockId}`);
+  }
+}
+

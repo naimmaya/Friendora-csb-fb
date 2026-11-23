@@ -18,6 +18,10 @@
         "avatarUrl": { "type": "string", "maxLength": 450000 },
         "coverUrl": { "type": "string", "maxLength": 450000 },
         "visibility": { "type": "string", "enum": ["public"] },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "isSuspended": { "type": "boolean" },
+        "reportCount": { "type": "number" },
+        "reportedByUids": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -271,6 +275,47 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "reporterUid", "postId", "targetAuthorUid", "reason", "details", "createdAt"]
+    },
+    "ProfileReport": {
+      "title": "ProfileReport",
+      "description": "User-submitted report against a profile; 10 unique reports auto-suspend the reported user.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reportType": { "type": "string", "enum": ["profile"] },
+        "reportedUserId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reporterUserId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "Fake profile",
+            "Harassment / Bullying",
+            "Hate speech",
+            "Spam / Scam",
+            "Inappropriate content",
+            "Impersonation",
+            "Other"
+          ]
+        },
+        "details": { "type": "string", "maxLength": 500 },
+        "status": { "type": "string", "enum": ["pending", "reviewed"] },
+        "time": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "reportType", "reportedUserId", "reporterUserId", "reason", "details", "status", "time"]
+    },
+    "UserBlock": {
+      "title": "UserBlock",
+      "description": "One-way block record created by blockerUid to hide blockedUid's profile and posts.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "blockerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "blockedUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "blockedName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "blockedAvatar": { "type": "string", "maxLength": 450000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "blockerUid", "blockedUid", "blockedName", "blockedAvatar", "createdAt"]
     },
     "Friendship": {
       "title": "Friendship",
@@ -644,8 +689,12 @@
       "description": "Posts hidden from an individual user's feed."
     },
     "/reports/{reportId}": {
-      "schema": { "$ref": "#/entities/PostReport" },
-      "description": "User-submitted post moderation reports."
+      "schema": { "$ref": "#/entities/ProfileReport" },
+      "description": "User-submitted post and profile moderation reports."
+    },
+    "/blocks/{blockId}": {
+      "schema": { "$ref": "#/entities/UserBlock" },
+      "description": "User-managed blocked people records keyed by {blockerUid}_{blockedUid}."
     },
     "/friendships/{friendshipId}": {
       "schema": { "$ref": "#/entities/Friendship" },
@@ -687,13 +736,17 @@
       "schema": { "$ref": "#/entities/CallSession" },
       "description": "1-on-1 WebRTC audio/video call signaling documents."
     },
+    "/calls/{callId}/candidates/{candidateId}": {
+      "schema": { "$ref": "#/entities/IceCandidate" },
+      "description": "Shared WebRTC ICE candidates exchanged by caller and receiver for a 1-on-1 call."
+    },
     "/calls/{callId}/callerCandidates/{candidateId}": {
       "schema": { "$ref": "#/entities/IceCandidate" },
-      "description": "Caller ICE candidates for a 1-on-1 WebRTC call."
+      "description": "Legacy caller ICE candidates for a 1-on-1 WebRTC call."
     },
     "/calls/{callId}/calleeCandidates/{candidateId}": {
       "schema": { "$ref": "#/entities/IceCandidate" },
-      "description": "Callee ICE candidates for a 1-on-1 WebRTC call."
+      "description": "Legacy callee ICE candidates for a 1-on-1 WebRTC call."
     }
   }
 }

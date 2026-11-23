@@ -34,8 +34,10 @@ interface CallOverlayProps {
   currentUser: UserProfile;
   /** Non-null when current user initiates an outgoing call */
   outgoingTarget: {peer: UserProfile; type: CallType} | null;
-  /** Non-null when Firestore detects a ringing incoming call for current user */
+  /** Non-null when Firestore detects a ringing or accepted incoming call for current user */
   incomingCall: CallSessionDoc | null;
+  /** Called immediately when receiver taps Accept so parent locks the active call session and never unmounts CallOverlay */
+  onAcceptCall?: (call: CallSessionDoc) => void;
   /** Friends/users list for the Messenger-style "Add Person" button */
   inviteCandidates: UserProfile[];
   onCloseCall: () => void;
@@ -53,35 +55,51 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
   currentUser,
   outgoingTarget,
   incomingCall,
+  onAcceptCall,
   inviteCandidates,
   onCloseCall,
 }) => {
+  // Lock initial incoming call snapshot so state transitions in parent never lose call metadata
+  const lockedIncomingRef = useRef<CallSessionDoc | null>(incomingCall);
+  if (incomingCall && (!lockedIncomingRef.current || lockedIncomingRef.current.id === incomingCall.id)) {
+    lockedIncomingRef.current = incomingCall;
+  }
+  const activeIncomingDoc = incomingCall || lockedIncomingRef.current;
+
   const isOutgoing = Boolean(outgoingTarget);
-  const callType: CallType = outgoingTarget?.type || incomingCall?.type || 'audio';
+  const callType: CallType = outgoingTarget?.type || activeIncomingDoc?.type || 'audio';
 
   const peerName = outgoingTarget
     ? outgoingTarget.peer.name
-    : incomingCall?.callerName || 'Member';
+    : activeIncomingDoc?.callerName || 'Member';
   const peerAvatar = outgoingTarget
     ? outgoingTarget.peer.avatar_url
-    : incomingCall?.callerAvatar || '';
+    : activeIncomingDoc?.callerAvatar || '';
   const peerUid = outgoingTarget
     ? outgoingTarget.peer.uid || ''
-    : incomingCall?.callerId || '';
+    : activeIncomingDoc?.callerId || '';
 
   const [phase, setPhase] = useState<CallPhase>(isOutgoing ? 'requesting_media' : 'incoming');
   const [statusNote, setStatusNote] = useState<string>(
-    isOutgoing ? 'Requesting camera & microphone...' : `Incoming ${callType === 'video' ? 'Video' : 'Audio'} Call`,
+    isOutgoing
+      ? callType === 'video'
+        ? 'Requesting camera & microphone...'
+        : 'Requesting microphone...'
+      : `Incoming ${callType === 'video' ? 'Video' : 'Audio'} Call`,
   );
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [elapsedSec, setElapsedSec] = useState<number>(0);
 
+  // Default: Mic ON, Video ON (for video calls), Speaker ON
   const [muted, setMuted] = useState(false);
-  const [speakerOn, setSpeakerOn] = useState(callType === 'video');
+  const [speakerOn, setSpeakerOn] = useState(true);
   const [cameraOff, setCameraOff] = useState(callType === 'audio');
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const [switchingCamera, setSwitchingCamera] = useState(false);
   const [hasRemoteVideo, setHasRemoteVideo] = useState(false);
+  const [audioBlocked, setAudioBlocked] = useState(false);
+  const [localStreamVersion, setLocalStreamVersion] = useState(0);
+  const [remoteStreamVersion, setRemoteStreamVersion] = useState(0);
 
   const [showAddPerson, setShowAddPerson] = useState(false);
   const [invitedUids, setInvitedUids] = useState<Record<string, boolean>>({});
@@ -96,10 +114,15 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
 
   const elapsedRef = useRef(0);
   const wasAcceptedRef = useRef(false);
+  const acceptingRef = useRef(false);
   const closedRef = useRef(false);
 
   const stopAllMedia = () => {
     ringtoneRef.current?.stop();
+    if (handlesRef.current) {
+      handlesRef.current.cleanup();
+      handlesRef.current = null;
+    }
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((t) => {
         try {
@@ -120,37 +143,51 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
       });
       remoteStreamRef.current = null;
     }
-    if (handlesRef.current) {
-      handlesRef.current.cleanup();
-      handlesRef.current = null;
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null;
+    }
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
+    }
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = null;
     }
   };
 
-  const attachLocalPreview = (stream: MediaStream) => {
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = stream;
-      localVideoRef.current.muted = true;
-      localVideoRef.current.play().catch(() => {});
-    }
+  const setLocalStream = (stream: MediaStream) => {
+    localStreamRef.current = stream;
+    setLocalStreamVersion((v) => v + 1);
   };
 
   const attachRemoteMedia = (stream: MediaStream) => {
     remoteStreamRef.current = stream;
-    const videoTracks = stream.getVideoTracks().filter((t) => t.readyState === 'live');
+    const videoTracks = stream
+      .getVideoTracks()
+      .filter((t) => t.readyState === 'live');
     setHasRemoteVideo(videoTracks.length > 0 && callType === 'video');
-
-    if (remoteAudioRef.current) {
-      remoteAudioRef.current.srcObject = stream;
-      remoteAudioRef.current.volume = speakerOn ? 1.0 : 0.55;
-      remoteAudioRef.current.play().catch(() => {});
-    }
-    if (remoteVideoRef.current && callType === 'video') {
-      remoteVideoRef.current.srcObject = stream;
-      remoteVideoRef.current.play().catch(() => {});
-    }
+    setRemoteStreamVersion((v) => v + 1);
   };
 
-  const finishAndClose = (finalLabel: string, delayMs = 900) => {
+  const tryPlayRemoteAudio = () => {
+    const audioEl = remoteAudioRef.current;
+    const stream = remoteStreamRef.current;
+    if (!audioEl || !stream) return;
+    if (audioEl.srcObject !== stream) {
+      audioEl.srcObject = stream;
+    }
+    audioEl.muted = false;
+    audioEl.volume = speakerOn ? 1.0 : 0.45;
+    audioEl
+      .play()
+      .then(() => {
+        setAudioBlocked(false);
+      })
+      .catch(() => {
+        setAudioBlocked(true);
+      });
+  };
+
+  const finishAndClose = (finalLabel: string, delayMs = 800) => {
     if (closedRef.current) return;
     closedRef.current = true;
     ringtoneRef.current?.stop();
@@ -162,7 +199,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
     }, delayMs);
   };
 
-  // Timer when connected
+  // Call timer when connected
   useEffect(() => {
     if (phase !== 'connected') return;
     const interval = window.setInterval(() => {
@@ -179,19 +216,52 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
     }
   }, [speakerOn]);
 
-  // Re-attach preview whenever phase or cameraOff changes
+  // Always bind local camera stream whenever PiP video element mounts or camera toggles
   useEffect(() => {
-    if (localStreamRef.current && localVideoRef.current && callType === 'video' && !cameraOff) {
-      localVideoRef.current.srcObject = localStreamRef.current;
-      localVideoRef.current.muted = true;
-      localVideoRef.current.play().catch(() => {});
+    const videoEl = localVideoRef.current;
+    const stream = localStreamRef.current;
+    if (videoEl && stream && callType === 'video' && !cameraOff) {
+      if (videoEl.srcObject !== stream) {
+        videoEl.srcObject = stream;
+      }
+      videoEl.muted = true;
+      videoEl.play().catch(() => {});
     }
-  }, [phase, cameraOff, callType]);
+  }, [localStreamVersion, phase, cameraOff, callType]);
 
-  // Start ringtone for incoming call
+  // Always bind remote audio & video streams whenever remote tracks arrive or phase updates
+  useEffect(() => {
+    const stream = remoteStreamRef.current;
+    if (!stream || phase === 'incoming' || phase === 'ended') return;
+
+    const audioEl = remoteAudioRef.current;
+    if (audioEl) {
+      if (audioEl.srcObject !== stream) {
+        audioEl.srcObject = stream;
+      }
+      audioEl.muted = false;
+      audioEl.volume = speakerOn ? 1.0 : 0.45;
+      audioEl
+        .play()
+        .then(() => setAudioBlocked(false))
+        .catch(() => setAudioBlocked(true));
+    }
+
+    const videoEl = remoteVideoRef.current;
+    if (videoEl && callType === 'video') {
+      if (videoEl.srcObject !== stream) {
+        videoEl.srcObject = stream;
+      }
+      // Keep <video> muted so autoplay is never blocked and voice plays cleanly via <audio> without echo
+      videoEl.muted = true;
+      videoEl.play().catch(() => {});
+    }
+  }, [remoteStreamVersion, phase, callType, speakerOn]);
+
+  // Initialize ringtone and clean up all media/PeerConnection on unmount
   useEffect(() => {
     ringtoneRef.current = new CallRingtoneController();
-    if (!isOutgoing && incomingCall) {
+    if (!isOutgoing && activeIncomingDoc) {
       ringtoneRef.current.start('incoming');
     }
     return () => {
@@ -199,7 +269,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
     };
   }, []);
 
-  // Outgoing call auto-initialization
+  // Outgoing call initialization: get mic/camera -> create offer -> write calls/{callId} -> wait for answer + ICE
   useEffect(() => {
     if (!outgoingTarget) return;
     let cancelled = false;
@@ -219,9 +289,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
           return;
         }
 
-        localStreamRef.current = stream;
-        attachLocalPreview(stream);
-
+        setLocalStream(stream);
         setPhase('calling');
         setStatusNote('Calling...');
         ringtoneRef.current?.start('outgoing');
@@ -233,9 +301,14 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
           stream,
           {
             onRemoteStream: (remote) => {
+              if (closedRef.current) return;
               attachRemoteMedia(remote);
               ringtoneRef.current?.stop();
               wasAcceptedRef.current = true;
+              if (noAnswerTimer) {
+                window.clearTimeout(noAnswerTimer);
+                noAnswerTimer = null;
+              }
               setPhase('connected');
               setStatusNote('Connected');
             },
@@ -250,30 +323,35 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
                   window.clearTimeout(noAnswerTimer);
                   noAnswerTimer = null;
                 }
-                setPhase('connected');
-                setStatusNote('Connected');
+                setPhase((prev) => (prev === 'connected' ? 'connected' : 'connecting'));
+                setStatusNote('Connecting audio & video...');
               } else if (status === 'declined') {
                 if (noAnswerTimer) {
                   window.clearTimeout(noAnswerTimer);
                   noAnswerTimer = null;
                 }
-                finishAndClose('Call declined', 1100);
+                finishAndClose('Call declined', 1000);
               } else if (status === 'ended' || status === 'missed') {
                 if (noAnswerTimer) {
                   window.clearTimeout(noAnswerTimer);
                   noAnswerTimer = null;
                 }
-                finishAndClose('Call ended', 900);
+                finishAndClose('Call ended', 800);
               }
             },
             onConnectionStateChange: (state) => {
+              if (closedRef.current) return;
               if (state === 'connected') {
                 ringtoneRef.current?.stop();
                 wasAcceptedRef.current = true;
+                if (noAnswerTimer) {
+                  window.clearTimeout(noAnswerTimer);
+                  noAnswerTimer = null;
+                }
                 setPhase('connected');
                 setStatusNote('Connected');
-              } else if (state === 'failed' || state === 'disconnected') {
-                if (!closedRef.current && wasAcceptedRef.current) {
+              } else if (state === 'disconnected' || state === 'failed') {
+                if (wasAcceptedRef.current) {
                   setStatusNote('Reconnecting...');
                 }
               }
@@ -294,7 +372,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
         // 45-second unanswered timeout -> Missed Call
         noAnswerTimer = window.setTimeout(async () => {
           if (!closedRef.current && !wasAcceptedRef.current && handlesRef.current && currentUser.uid) {
-            await endCallInFirestore(handlesRef.current.callDoc, currentUser.uid, 0, false, true);
+            await endCallInFirestore(handlesRef.current.callDoc, currentUser.uid, 0, false, true, true);
             finishAndClose('No answer — Missed call', 1200);
           }
         }, 45_000);
@@ -316,23 +394,37 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
   }, [outgoingTarget]);
 
   const handleAcceptIncoming = async () => {
-    if (!incomingCall || !currentUser.uid) return;
+    const targetCall = activeIncomingDoc;
+    if (!targetCall || !currentUser.uid || acceptingRef.current) return;
+    acceptingRef.current = true;
     ringtoneRef.current?.stop();
     setErrorMessage(null);
+
+    // CRITICAL: Immediately promote this call to active in App.tsx BEFORE Firestore status changes to "accepted"
+    // so subscribeIncomingCalls (status == 'ringing') returning null NEVER unmounts CallOverlay!
+    onAcceptCall?.(targetCall);
+
+    // Immediately switch from Incoming Call screen to Active Call screen
     setPhase('connecting');
     setStatusNote(
-      incomingCall.type === 'video'
-        ? 'Allowing Camera & Microphone...'
-        : 'Allowing Microphone...',
+      targetCall.type === 'video'
+        ? 'Starting Camera & Microphone...'
+        : 'Starting Microphone...',
     );
 
     try {
-      const stream = await requestCallMedia(incomingCall.type, 'user');
-      localStreamRef.current = stream;
-      attachLocalPreview(stream);
+      const stream = await requestCallMedia(targetCall.type, 'user');
+      if (closedRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
 
-      const handles = await acceptIncomingCallSession(incomingCall, stream, {
+      setLocalStream(stream);
+      setStatusNote('Connecting call...');
+
+      const handles = await acceptIncomingCallSession(targetCall, stream, {
         onRemoteStream: (remote) => {
+          if (closedRef.current) return;
           attachRemoteMedia(remote);
           wasAcceptedRef.current = true;
           setPhase('connected');
@@ -341,57 +433,80 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
         onStatusChange: (status) => {
           if (closedRef.current) return;
           if (status === 'ended' || status === 'missed' || status === 'declined') {
-            finishAndClose('Call ended', 900);
+            finishAndClose('Call ended', 800);
           }
         },
         onConnectionStateChange: (state) => {
+          if (closedRef.current) return;
           if (state === 'connected') {
             wasAcceptedRef.current = true;
             setPhase('connected');
             setStatusNote('Connected');
+          } else if (state === 'disconnected' || state === 'failed') {
+            if (wasAcceptedRef.current) {
+              setStatusNote('Reconnecting...');
+            }
           }
         },
         onError: (msg) => setErrorMessage(msg),
       });
 
+      if (closedRef.current) {
+        handles.cleanup();
+        return;
+      }
+
       handlesRef.current = handles;
       wasAcceptedRef.current = true;
-      setPhase('connected');
-      setStatusNote('Connected');
+      setPhase((prev) => (prev === 'connected' ? 'connected' : 'connecting'));
+      setStatusNote((prev) => (prev === 'Connected' ? 'Connected' : 'Connecting audio & video...'));
     } catch (err) {
-      setErrorMessage(formatFirestoreErrorMessage(err));
-      setPhase('incoming');
-      setStatusNote('Permission needed to answer call');
+      acceptingRef.current = false;
+      const msg = formatFirestoreErrorMessage(err);
+      setErrorMessage(msg);
+      if (msg.includes('already ended') || msg.includes('no longer available')) {
+        finishAndClose('Call ended', 1000);
+      } else {
+        setStatusNote('Permission needed to join call');
+      }
     }
   };
 
   const handleDeclineIncoming = async () => {
-    if (!incomingCall || !currentUser.uid) {
+    const targetCall = activeIncomingDoc;
+    if (!targetCall || !currentUser.uid) {
       onCloseCall();
       return;
     }
     ringtoneRef.current?.stop();
-    await declineIncomingCallDoc(incomingCall, currentUser.uid);
+    await declineIncomingCallDoc(targetCall, currentUser.uid);
     finishAndClose('Call declined', 500);
   };
 
   const handleEndCall = async () => {
     ringtoneRef.current?.stop();
-    const activeDoc = handlesRef.current?.callDoc || incomingCall;
+    const activeDoc = handlesRef.current?.callDoc || activeIncomingDoc;
+    const accepted = wasAcceptedRef.current;
+    const duration = elapsedRef.current;
+
+    // Immediately stop media and close PeerConnection locally
+    stopAllMedia();
+
     if (activeDoc && currentUser.uid) {
       await endCallInFirestore(
         activeDoc,
         currentUser.uid,
-        elapsedRef.current,
-        wasAcceptedRef.current,
+        duration,
+        accepted,
         true,
+        false,
       );
     }
     finishAndClose(
-      wasAcceptedRef.current
-        ? `Ended · ${formatCallDuration(Math.max(1, elapsedRef.current))}`
-        : 'Call cancelled',
-      600,
+      accepted
+        ? `Ended · ${formatCallDuration(Math.max(1, duration))}`
+        : 'Call ended',
+      500,
     );
   };
 
@@ -423,7 +538,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
     try {
       await switchCameraTrack(handlesRef.current?.pc || null, localStreamRef.current, nextMode);
       setFacingMode(nextMode);
-      attachLocalPreview(localStreamRef.current);
+      setLocalStreamVersion((v) => v + 1);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Unable to switch camera on this device.');
     } finally {
@@ -447,16 +562,17 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
 
   return (
     <div className="fixed inset-0 z-[90] flex flex-col bg-slate-950 text-white select-none overflow-hidden">
-      {/* Hidden audio element ensures remote voice plays reliably on mobile & desktop */}
+      {/* Dedicated audio element plays remote voice cleanly on mobile & desktop */}
       <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
 
-      {/* Background layer: Full-screen remote video OR rich Messenger blur gradient */}
+      {/* Background layer: Full-screen remote video OR rich Messenger gradient */}
       {callType === 'video' && phase !== 'incoming' ? (
         <div className="absolute inset-0 bg-slate-950">
           <video
             ref={remoteVideoRef}
             autoPlay
             playsInline
+            muted
             className={`h-full w-full object-cover transition-opacity duration-300 ${
               hasRemoteVideo ? 'opacity-100' : 'opacity-0'
             }`}
@@ -474,17 +590,17 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
 
       {/* Top Messenger status bar */}
       <div className="relative z-10 flex items-center justify-between px-4 sm:px-6 pt-5 pb-3">
-        <div className="flex items-center gap-2.5">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 backdrop-blur-md px-3 py-1 text-xs font-semibold text-white/90 border border-white/10">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 backdrop-blur-md px-3 py-1 text-xs font-semibold text-white/90 border border-white/10 shrink-0">
             {callType === 'video' ? (
               <Video className="w-3.5 h-3.5 text-blue-400" />
             ) : (
               <Phone className="w-3.5 h-3.5 text-emerald-400" />
             )}
-            {callType === 'video' ? 'Messenger Video Call' : 'Messenger Audio Call'}
+            {callType === 'video' && hasRemoteVideo ? peerName : callType === 'video' ? 'Video Call' : 'Voice Call'}
           </span>
           {phase === 'connected' && (
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/20 border border-emerald-400/30 px-3 py-1 text-xs font-mono font-bold text-emerald-300">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/20 border border-emerald-400/30 px-3 py-1 text-xs font-mono font-bold text-emerald-300 shrink-0">
               <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
               {formatCallDuration(elapsedSec)}
             </span>
@@ -497,12 +613,26 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
             onClick={handleSwitchCamera}
             disabled={switchingCamera || cameraOff}
             title="Switch Camera"
-            className="h-10 w-10 rounded-full bg-white/15 backdrop-blur-md hover:bg-white/25 disabled:opacity-40 flex items-center justify-center transition-colors"
+            className="h-10 w-10 rounded-full bg-white/15 backdrop-blur-md hover:bg-white/25 disabled:opacity-40 flex items-center justify-center transition-colors shrink-0"
           >
             <RefreshCw className={`w-5 h-5 ${switchingCamera ? 'animate-spin' : ''}`} />
           </button>
         )}
       </div>
+
+      {/* Tap-to-unmute audio prompt only if browser autoplay policy blocked remote audio */}
+      {audioBlocked && phase !== 'incoming' && phase !== 'ended' && (
+        <div className="relative z-20 mx-auto mt-1">
+          <button
+            type="button"
+            onClick={tryPlayRemoteAudio}
+            className="inline-flex items-center gap-2 rounded-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-4 py-2 shadow-lg animate-bounce cursor-pointer"
+          >
+            <Volume2 className="w-4 h-4" />
+            Tap to enable call audio
+          </button>
+        </div>
+      )}
 
       {/* Error banner if camera/mic blocked or Firestore error */}
       {errorMessage && (
@@ -510,25 +640,36 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
           <AlertCircle className="w-5 h-5 text-red-300 shrink-0 mt-0.5" />
           <div className="flex-1">
             <p className="font-medium leading-snug">{errorMessage}</p>
-            {phase === 'ended' && (
-              <button
-                type="button"
-                onClick={onCloseCall}
-                className="mt-2 inline-flex items-center px-3 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-xs font-semibold text-white"
-              >
-                Close Call Screen
-              </button>
-            )}
+            <div className="mt-2 flex flex-wrap gap-2">
+              {!isOutgoing && phase !== 'ended' && !handlesRef.current && (
+                <button
+                  type="button"
+                  onClick={handleAcceptIncoming}
+                  className="inline-flex items-center px-3 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-xs font-semibold text-slate-950 cursor-pointer"
+                >
+                  Retry Permission
+                </button>
+              )}
+              {phase === 'ended' && (
+                <button
+                  type="button"
+                  onClick={onCloseCall}
+                  className="inline-flex items-center px-3 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-xs font-semibold text-white cursor-pointer"
+                >
+                  Close Call Screen
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
 
-      {/* Center Caller / Peer Profile Hero (hidden once full-screen remote video is live) */}
+      {/* Center Caller / Peer Profile Hero (shown for Audio calls, Incoming screen, and while Video is connecting) */}
       <div className="relative z-10 flex-1 flex flex-col items-center justify-center px-6 text-center">
         {(!hasRemoteVideo || callType === 'audio' || phase === 'incoming') && (
           <>
             <div className="relative mb-6">
-              {(phase === 'incoming' || phase === 'calling' || phase === 'connecting') && (
+              {(phase === 'incoming' || phase === 'calling' || phase === 'connecting' || phase === 'requesting_media') && (
                 <>
                   <span className="absolute -inset-4 rounded-full bg-blue-500/25 animate-ping" />
                   <span className="absolute -inset-2 rounded-full bg-blue-400/20 animate-pulse" />
@@ -556,7 +697,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
           </>
         )}
 
-        {/* Small floating local video preview bottom-right (PiP) */}
+        {/* Small floating local self-video preview in bottom-right corner (Video Calls only) */}
         {callType === 'video' && phase !== 'incoming' && phase !== 'ended' && (
           <div className="fixed right-4 bottom-28 sm:right-6 sm:bottom-32 z-20 w-28 h-40 sm:w-36 sm:h-52 rounded-2xl overflow-hidden bg-slate-900 border-2 border-white/25 shadow-2xl">
             {!cameraOff ? (
@@ -583,13 +724,13 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
       {/* Bottom Controls Bar */}
       <div className="relative z-20 pb-8 pt-4 px-4 sm:px-6">
         {phase === 'incoming' ? (
-          /* Incoming Call: Green Accept + Red Decline */
+          /* Incoming Call Screen: Green Accept + Red Decline */
           <div className="max-w-xs mx-auto flex items-center justify-between gap-8">
             <div className="flex flex-col items-center gap-2">
               <button
                 type="button"
                 onClick={handleDeclineIncoming}
-                className="h-16 w-16 rounded-full bg-red-600 hover:bg-red-500 active:scale-95 text-white flex items-center justify-center shadow-xl shadow-red-600/35 transition-all"
+                className="h-16 w-16 rounded-full bg-red-600 hover:bg-red-500 active:scale-95 text-white flex items-center justify-center shadow-xl shadow-red-600/35 transition-all cursor-pointer"
                 aria-label="Decline call"
               >
                 <PhoneOff className="w-7 h-7" />
@@ -601,7 +742,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
               <button
                 type="button"
                 onClick={handleAcceptIncoming}
-                className="h-16 w-16 rounded-full bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-white flex items-center justify-center shadow-xl shadow-emerald-500/40 animate-pulse transition-all"
+                className="h-16 w-16 rounded-full bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-white flex items-center justify-center shadow-xl shadow-emerald-500/40 animate-pulse transition-all cursor-pointer"
                 aria-label="Accept call"
               >
                 {callType === 'video' ? (
@@ -621,7 +762,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
               <button
                 type="button"
                 onClick={() => setSpeakerOn((v) => !v)}
-                className="flex flex-col items-center gap-1.5 group"
+                className="flex flex-col items-center gap-1.5 group cursor-pointer"
               >
                 <span
                   className={`h-12 w-12 rounded-full flex items-center justify-center transition-all ${
@@ -641,7 +782,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
                   <button
                     type="button"
                     onClick={handleToggleCamera}
-                    className="flex flex-col items-center gap-1.5"
+                    className="flex flex-col items-center gap-1.5 cursor-pointer"
                   >
                     <span
                       className={`h-12 w-12 rounded-full flex items-center justify-center transition-all ${
@@ -653,7 +794,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
                       {cameraOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
                     </span>
                     <span className="text-[11px] font-medium text-white/80">
-                      {cameraOff ? 'Cam Off' : 'Camera'}
+                      {cameraOff ? 'Video Off' : 'Video On'}
                     </span>
                   </button>
 
@@ -661,7 +802,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
                     type="button"
                     onClick={handleSwitchCamera}
                     disabled={switchingCamera || cameraOff}
-                    className="flex flex-col items-center gap-1.5 disabled:opacity-40"
+                    className="flex flex-col items-center gap-1.5 disabled:opacity-40 cursor-pointer"
                   >
                     <span className="h-12 w-12 rounded-full bg-white/15 hover:bg-white/25 text-white flex items-center justify-center transition-all">
                       <RefreshCw className={`w-5 h-5 ${switchingCamera ? 'animate-spin' : ''}`} />
@@ -675,7 +816,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
               <button
                 type="button"
                 onClick={handleToggleMute}
-                className="flex flex-col items-center gap-1.5"
+                className="flex flex-col items-center gap-1.5 cursor-pointer"
               >
                 <span
                   className={`h-12 w-12 rounded-full flex items-center justify-center transition-all ${
@@ -685,7 +826,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
                   {muted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
                 </span>
                 <span className="text-[11px] font-medium text-white/80">
-                  {muted ? 'Unmute' : 'Mute'}
+                  {muted ? 'Muted' : 'Mic On'}
                 </span>
               </button>
 
@@ -693,7 +834,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
               <button
                 type="button"
                 onClick={() => setShowAddPerson(true)}
-                className="flex flex-col items-center gap-1.5"
+                className="flex flex-col items-center gap-1.5 cursor-pointer"
               >
                 <span className="h-12 w-12 rounded-full bg-white/15 hover:bg-white/25 text-white flex items-center justify-center transition-all">
                   <UserPlus className="w-5 h-5" />
@@ -705,7 +846,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({
               <button
                 type="button"
                 onClick={handleEndCall}
-                className="flex flex-col items-center gap-1.5"
+                className="flex flex-col items-center gap-1.5 cursor-pointer"
                 aria-label="End call"
               >
                 <span className="h-12 w-12 rounded-full bg-red-600 hover:bg-red-500 active:scale-95 text-white flex items-center justify-center shadow-lg shadow-red-600/40 transition-all">

@@ -56,13 +56,16 @@ service cloud.firestore {
           'avatarUrl',
           'coverUrl',
           'visibility',
+          'status',
+          'isSuspended',
+          'reportCount',
+          'reportedByUids',
           'createdAt',
           'updatedAt'
         ])
         && data.uid is string
         && isValidId(data.uid)
         && data.uid == userId
-        && data.uid == request.auth.uid
         && data.name is string
         && data.name.size() >= 2
         && data.name.size() <= 60
@@ -78,6 +81,17 @@ service cloud.firestore {
         && data.coverUrl.size() <= 450000
         && data.visibility is string
         && data.visibility == 'public'
+        && (!('status' in data) || (data.status is string && data.status in ['active', 'suspended']))
+        && (!('isSuspended' in data) || data.isSuspended is bool)
+        && (!('reportCount' in data) || (data.reportCount is number && data.reportCount >= 0 && data.reportCount <= 1000))
+        && (
+          !('reportedByUids' in data) ||
+          (
+            data.reportedByUids is list
+            && data.reportedByUids.size() <= 100
+            && (data.reportedByUids.size() == 0 || data.reportedByUids[0] is string)
+          )
+        )
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -371,6 +385,89 @@ service cloud.firestore {
         && data.reason in ['spam', 'harassment', 'misinformation', 'inappropriate', 'other']
         && data.details is string
         && data.details.size() <= 500
+        && data.createdAt is timestamp;
+    }
+
+    function isValidProfileReport(data, reportId) {
+      return data.keys().hasAll([
+          'id',
+          'reportType',
+          'reportedUserId',
+          'reporterUserId',
+          'reason',
+          'details',
+          'status',
+          'time'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'reportType',
+          'reportedUserId',
+          'reporterUserId',
+          'reason',
+          'details',
+          'status',
+          'time'
+        ])
+        && data.id is string
+        && isValidId(data.id)
+        && data.id == reportId
+        && data.reportType is string
+        && data.reportType == 'profile'
+        && data.reportedUserId is string
+        && isValidId(data.reportedUserId)
+        && data.reporterUserId is string
+        && isValidId(data.reporterUserId)
+        && data.reporterUserId == request.auth.uid
+        && data.reportedUserId != data.reporterUserId
+        && data.reason is string
+        && data.reason in [
+          'Fake profile',
+          'Harassment / Bullying',
+          'Hate speech',
+          'Spam / Scam',
+          'Inappropriate content',
+          'Impersonation',
+          'Other'
+        ]
+        && data.details is string
+        && data.details.size() <= 500
+        && data.status is string
+        && data.status == 'pending'
+        && data.time is timestamp;
+    }
+
+    function isValidUserBlock(data, blockId) {
+      return data.keys().hasAll([
+          'id',
+          'blockerUid',
+          'blockedUid',
+          'blockedName',
+          'blockedAvatar',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'blockerUid',
+          'blockedUid',
+          'blockedName',
+          'blockedAvatar',
+          'createdAt'
+        ])
+        && data.id is string
+        && isValidId(data.id)
+        && data.id == blockId
+        && data.blockerUid is string
+        && isValidId(data.blockerUid)
+        && data.blockerUid == request.auth.uid
+        && data.blockedUid is string
+        && isValidId(data.blockedUid)
+        && data.blockerUid != data.blockedUid
+        && data.blockedName is string
+        && data.blockedName.size() >= 1
+        && data.blockedName.size() <= 60
+        && data.blockedAvatar is string
+        && data.blockedAvatar.size() <= 450000
         && data.createdAt is timestamp;
     }
 
@@ -999,26 +1096,72 @@ service cloud.firestore {
         && isValidId(userId)
         && isOwner(userId)
         && isValidPublicProfile(incoming(), userId)
+        && incoming().uid == request.auth.uid
+        && (!('status' in incoming()) || incoming().status == 'active')
+        && (!('isSuspended' in incoming()) || incoming().isSuspended == false)
+        && (!('reportCount' in incoming()) || incoming().reportCount == 0)
+        && (!('reportedByUids' in incoming()) || incoming().reportedByUids.size() == 0)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
 
       allow update: if isVerifiedUser()
         && isValidId(userId)
-        && isOwner(userId)
         && isValidPublicProfile(incoming(), userId)
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'name',
-          'bio',
-          'location',
-          'work',
-          'avatarUrl',
-          'coverUrl',
-          'visibility',
-          'updatedAt'
-        ]);
+        && (
+          // Action 1: Owner updates own profile details (blocked while suspended)
+          (
+            isOwner(userId)
+            && (!('isSuspended' in existing()) || existing().isSuspended == false)
+            && (!('status' in existing()) || existing().status != 'suspended')
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'name',
+              'bio',
+              'location',
+              'work',
+              'avatarUrl',
+              'coverUrl',
+              'visibility',
+              'updatedAt'
+            ])
+          ) ||
+          // Action 2: Verified non-owner submits a unique profile report (auto-suspends at 10 unique reports)
+          (
+            request.auth.uid != userId
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'reportedByUids',
+              'reportCount',
+              'isSuspended',
+              'status',
+              'updatedAt'
+            ])
+            && existsAfter(/databases/$(database)/documents/reports/$('prof_' + userId + '_' + request.auth.uid))
+            && (
+              (
+                (!('reportedByUids' in existing()) || existing().reportedByUids.size() == 0)
+                && incoming().reportedByUids.size() == 1
+                && incoming().reportedByUids[0] == request.auth.uid
+                && incoming().reportCount == 1
+                && incoming().isSuspended == false
+                && incoming().status == 'active'
+              ) ||
+              (
+                'reportedByUids' in existing()
+                && existing().reportedByUids.size() >= 1
+                && existing().reportedByUids.size() < 100
+                && !(request.auth.uid in existing().reportedByUids)
+                && (request.auth.uid in incoming().reportedByUids)
+                && incoming().reportedByUids.size() == existing().reportedByUids.size() + 1
+                && incoming().reportedByUids.hasAll(existing().reportedByUids)
+                && incoming().reportCount == incoming().reportedByUids.size()
+                && incoming().isSuspended == (incoming().reportedByUids.size() >= 10)
+                && incoming().status == (incoming().reportedByUids.size() >= 10 ? 'suspended' : 'active')
+              )
+            )
+          )
+        );
 
       allow delete: if false;
 
@@ -1308,21 +1451,67 @@ service cloud.firestore {
         && existing().userUid == request.auth.uid;
     }
 
-    // POST MODERATION REPORTS
+    // POST & PROFILE MODERATION REPORTS
     match /reports/{reportId} {
       allow get: if isVerifiedUser()
         && isValidId(reportId)
-        && existing().reporterUid == request.auth.uid;
+        && (
+          resource == null ||
+          ('reporterUid' in existing() && existing().reporterUid == request.auth.uid) ||
+          ('reporterUserId' in existing() && existing().reporterUserId == request.auth.uid)
+        );
       allow list: if isVerifiedUser()
-        && resource.data.reporterUid == request.auth.uid;
+        && (
+          ('reporterUid' in resource.data && resource.data.reporterUid == request.auth.uid) ||
+          ('reporterUserId' in resource.data && resource.data.reporterUserId == request.auth.uid)
+        );
 
       allow create: if isVerifiedUser()
         && isValidId(reportId)
-        && isValidPostReport(incoming(), reportId)
-        && incoming().createdAt == request.time
-        && exists(/databases/$(database)/documents/posts/$(incoming().postId));
+        && (
+          (
+            isValidPostReport(incoming(), reportId)
+            && incoming().createdAt == request.time
+            && exists(/databases/$(database)/documents/posts/$(incoming().postId))
+          ) ||
+          (
+            isValidProfileReport(incoming(), reportId)
+            && reportId == ('prof_' + incoming().reportedUserId + '_' + request.auth.uid)
+            && incoming().time == request.time
+            && exists(/databases/$(database)/documents/users/$(incoming().reportedUserId))
+          )
+        );
 
       allow update, delete: if false;
+    }
+
+    // BLOCKED PEOPLE (Owner-managed block list; readable by blocker or blocked to hide profiles)
+    match /blocks/{blockId} {
+      allow get: if isVerifiedUser()
+        && isValidId(blockId)
+        && (
+          resource == null ||
+          existing().blockerUid == request.auth.uid ||
+          existing().blockedUid == request.auth.uid
+        );
+      allow list: if isVerifiedUser()
+        && (
+          resource.data.blockerUid == request.auth.uid ||
+          resource.data.blockedUid == request.auth.uid
+        );
+
+      allow create: if isVerifiedUser()
+        && isValidId(blockId)
+        && blockId == (request.auth.uid + '_' + incoming().blockedUid)
+        && isValidUserBlock(incoming(), blockId)
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/users/$(incoming().blockedUid));
+
+      allow update: if false;
+
+      allow delete: if isVerifiedUser()
+        && isValidId(blockId)
+        && existing().blockerUid == request.auth.uid;
     }
 
     // FRIENDSHIPS
@@ -1743,6 +1932,26 @@ service cloud.firestore {
         );
 
       allow delete: if false;
+
+      match /candidates/{candidateId} {
+        allow get: if isVerifiedUser()
+          && isValidId(callId)
+          && isValidId(candidateId)
+          && request.auth.uid in existing().participantUids;
+        allow list: if isVerifiedUser()
+          && request.auth.uid in resource.data.participantUids;
+
+        allow create: if isVerifiedUser()
+          && isValidId(callId)
+          && isValidId(candidateId)
+          && isValidIceCandidate(incoming())
+          && incoming().createdAt == request.time
+          && request.auth.uid in get(/databases/$(database)/documents/calls/$(callId)).data.participantUids
+          && get(/databases/$(database)/documents/calls/$(callId)).data.status in ['ringing', 'accepted']
+          && incoming().participantUids == get(/databases/$(database)/documents/calls/$(callId)).data.participantUids;
+
+        allow update, delete: if false;
+      }
 
       match /callerCandidates/{candidateId} {
         allow get: if isVerifiedUser()
