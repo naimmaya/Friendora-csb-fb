@@ -501,6 +501,33 @@
         "updatedAt"
       ]
     },
+    "GroupCallParticipant": {
+      "title": "GroupCallParticipant",
+      "description": "Real-time participant join/leave and mic/video state inside a group call.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "callId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "avatarUrl": { "type": "string", "maxLength": 450000 },
+        "status": { "type": "string", "enum": ["joined", "left"] },
+        "isMuted": { "type": "boolean" },
+        "isVideoOff": { "type": "boolean" },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "callId",
+        "name",
+        "avatarUrl",
+        "status",
+        "isMuted",
+        "isVideoOff",
+        "joinedAt",
+        "updatedAt"
+      ]
+    },
     "GroupCallSignal": {
       "title": "GroupCallSignal",
       "description": "Pairwise WebRTC offer, answer, or ICE candidate inside a group call.",
@@ -719,6 +746,10 @@
     "/groupCalls/{callId}": {
       "schema": { "$ref": "#/entities/GroupCallSession" },
       "description": "Multi-party WebRTC group audio/video call signaling sessions."
+    },
+    "/groupCalls/{callId}/participants/{userId}": {
+      "schema": { "$ref": "#/entities/GroupCallParticipant" },
+      "description": "Real-time participant join/leave and mic/camera state inside a group call."
     },
     "/groupCalls/{callId}/signals/{signalId}": {
       "schema": { "$ref": "#/entities/GroupCallSignal" },

@@ -811,6 +811,49 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidGroupCallParticipant(data, callId, userId) {
+      return data.keys().hasAll([
+          'uid',
+          'callId',
+          'name',
+          'avatarUrl',
+          'status',
+          'isMuted',
+          'isVideoOff',
+          'joinedAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'callId',
+          'name',
+          'avatarUrl',
+          'status',
+          'isMuted',
+          'isVideoOff',
+          'joinedAt',
+          'updatedAt'
+        ])
+        && data.uid is string
+        && isValidId(data.uid)
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && data.callId is string
+        && isValidId(data.callId)
+        && data.callId == callId
+        && data.name is string
+        && data.name.size() >= 1
+        && data.name.size() <= 60
+        && data.avatarUrl is string
+        && data.avatarUrl.size() <= 450000
+        && data.status is string
+        && data.status in ['joined', 'left']
+        && data.isMuted is bool
+        && data.isVideoOff is bool
+        && data.joinedAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     function isValidGroupCallSignal(data, callId, signalId) {
       return data.keys().hasAll([
           'id',
@@ -1743,6 +1786,47 @@ service cloud.firestore {
         ]);
 
       allow delete: if false;
+
+      match /participants/{userId} {
+        allow get: if isVerifiedUser()
+          && isValidId(callId)
+          && isValidId(userId)
+          && request.auth.uid in get(/databases/$(database)/documents/groupCalls/$(callId)).data.memberUids;
+        allow list: if isVerifiedUser()
+          && resource.data.callId == callId
+          && request.auth.uid in get(/databases/$(database)/documents/groupCalls/$(callId)).data.memberUids;
+
+        allow create: if isVerifiedUser()
+          && isValidId(callId)
+          && isValidId(userId)
+          && isOwner(userId)
+          && isValidGroupCallParticipant(incoming(), callId, userId)
+          && incoming().joinedAt == request.time
+          && incoming().updatedAt == request.time
+          && get(/databases/$(database)/documents/groupCalls/$(callId)).data.status in ['ringing', 'active']
+          && request.auth.uid in get(/databases/$(database)/documents/groupCalls/$(callId)).data.memberUids;
+
+        allow update: if isVerifiedUser()
+          && isValidId(callId)
+          && isValidId(userId)
+          && isOwner(userId)
+          && isValidGroupCallParticipant(incoming(), callId, userId)
+          && incoming().uid == existing().uid
+          && incoming().callId == existing().callId
+          && incoming().joinedAt == existing().joinedAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'name',
+            'avatarUrl',
+            'status',
+            'isMuted',
+            'isVideoOff',
+            'updatedAt'
+          ])
+          && request.auth.uid in get(/databases/$(database)/documents/groupCalls/$(callId)).data.memberUids;
+
+        allow delete: if false;
+      }
 
       match /signals/{signalId} {
         allow get: if isVerifiedUser()

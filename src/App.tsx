@@ -1128,12 +1128,13 @@ export default function App() {
       {/* Real-time Multi-Member Group Audio & Video Call Overlay */}
       {(activeGroupCall || incomingGroupCall) && (
         <GroupCallOverlay
+          key={(activeGroupCall || incomingGroupCall)!.id}
           call={(activeGroupCall || incomingGroupCall)!}
           mode={activeGroupCall ? 'active' : 'incoming'}
           currentUser={currentUser}
           allUsers={allUsers}
-          onAcceptIncoming={(acceptedCall) => {
-            setActiveGroupCall(acceptedCall);
+          onAcceptIncoming={(accepted) => {
+            setActiveGroupCall(accepted);
           }}
           onDeclineIncoming={(callId) => {
             setDeclinedGroupCallIds((prev) => {
@@ -1142,8 +1143,13 @@ export default function App() {
               return next;
             });
           }}
-          onCallEnded={() => {
+          onCallEnded={(endedCallId) => {
             setActiveGroupCall(null);
+            setDeclinedGroupCallIds((prev) => {
+              const next = new Set(prev);
+              next.add(endedCallId);
+              return next;
+            });
           }}
         />
       )}

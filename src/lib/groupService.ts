@@ -569,6 +569,96 @@ export function formatGroupCallLogMessage(
   return `${label} - ${durStr}, ${joinedText}`;
 }
 
+export interface GroupCallParticipantDoc {
+  uid: string;
+  callId: string;
+  name: string;
+  avatarUrl: string;
+  status: 'joined' | 'left';
+  isMuted: boolean;
+  isVideoOff: boolean;
+  joinedAt: string;
+  updatedAt: string;
+}
+
+function mapGroupCallParticipantDoc(
+  uid: string,
+  callId: string,
+  data: Record<string, unknown>,
+): GroupCallParticipantDoc {
+  return {
+    uid: String(data.uid || uid),
+    callId: String(data.callId || callId),
+    name: String(data.name || 'Member'),
+    avatarUrl: String(data.avatarUrl || ''),
+    status: data.status === 'left' ? 'left' : 'joined',
+    isMuted: Boolean(data.isMuted),
+    isVideoOff: Boolean(data.isVideoOff),
+    joinedAt: tsToIso(data.joinedAt),
+    updatedAt: tsToIso(data.updatedAt),
+  };
+}
+
+export async function upsertGroupCallParticipant(
+  callId: string,
+  user: UserProfile,
+  opts: {status: 'joined' | 'left'; isMuted: boolean; isVideoOff: boolean},
+): Promise<void> {
+  if (!user.uid) return;
+  const partRef = doc(db, 'groupCalls', callId, 'participants', user.uid);
+  const name = clamp(user.name, 60) || 'Member';
+  const avatarUrl = clamp(user.avatar_url, 450000);
+  try {
+    const existing = await getDoc(partRef);
+    if (existing.exists()) {
+      await updateDoc(partRef, {
+        name,
+        avatarUrl,
+        status: opts.status,
+        isMuted: opts.isMuted,
+        isVideoOff: opts.isVideoOff,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(partRef, {
+        uid: user.uid,
+        callId,
+        name,
+        avatarUrl,
+        status: opts.status,
+        isMuted: opts.isMuted,
+        isVideoOff: opts.isVideoOff,
+        joinedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch {
+    // Non-fatal if call already ended
+  }
+}
+
+export function subscribeGroupCallParticipants(
+  callId: string,
+  onParticipants: (participants: GroupCallParticipantDoc[]) => void,
+): Unsubscribe {
+  const q = query(
+    collection(db, 'groupCalls', callId, 'participants'),
+    where('callId', '==', callId),
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs
+        .map((d) => mapGroupCallParticipantDoc(d.id, callId, d.data() as Record<string, unknown>))
+        .sort((a, b) => new Date(a.joinedAt).getTime() - new Date(b.joinedAt).getTime());
+      onParticipants(list);
+    },
+    () => {
+      // Ignore transient snapshot error
+    },
+  );
+}
+
 export async function startGroupCallPermanent(
   group: ChatGroupDoc,
   host: UserProfile,
@@ -598,6 +688,13 @@ export async function startGroupCallPermanent(
     handleFirestoreError(error, OperationType.CREATE, `groupCalls/${callId}`);
   }
 
+  // Register host in groupCalls/{callId}/participants/{hostUid}
+  await upsertGroupCallParticipant(callId, host, {
+    status: 'joined',
+    isMuted: false,
+    isVideoOff: type === 'audio',
+  });
+
   const now = new Date().toISOString();
   return {
     id: callId,
@@ -619,8 +716,10 @@ export async function startGroupCallPermanent(
 
 export async function joinGroupCallPermanent(
   callId: string,
-  userUid: string,
+  user: UserProfile,
+  isVideoOff: boolean,
 ): Promise<GroupCallDoc | null> {
+  if (!user.uid) return null;
   const ref = doc(db, 'groupCalls', callId);
   try {
     const snap = await getDoc(ref);
@@ -628,19 +727,25 @@ export async function joinGroupCallPermanent(
     const current = mapGroupCallDoc(snap.id, snap.data() as Record<string, unknown>);
     if (current.status === 'ended') return current;
 
-    const activeUids = Array.from(new Set([...current.activeUids, userUid])).slice(0, 16);
-    const joinedUids = Array.from(new Set([...current.joinedUids, userUid])).slice(0, 50);
+    const activeUids = Array.from(new Set([...current.activeUids, user.uid])).slice(0, 16);
+    const joinedUids = Array.from(new Set([...current.joinedUids, user.uid])).slice(0, 50);
 
     await updateDoc(ref, {
-      status: 'active',
+      status: activeUids.length >= 2 ? 'active' : current.status,
       activeUids,
       joinedUids,
       updatedAt: serverTimestamp(),
     });
 
+    await upsertGroupCallParticipant(callId, user, {
+      status: 'joined',
+      isMuted: false,
+      isVideoOff,
+    });
+
     return {
       ...current,
-      status: 'active',
+      status: activeUids.length >= 2 ? 'active' : current.status,
       activeUids,
       joinedUids,
     };
@@ -653,9 +758,16 @@ export async function leaveGroupCallPermanent(
   callId: string,
   user: UserProfile,
   elapsedSec: number,
-  forceEndForAll = false,
 ): Promise<{ended: boolean; callDoc: GroupCallDoc | null}> {
   if (!user.uid) return {ended: false, callDoc: null};
+
+  // Mark participant as left in groupCalls/{callId}/participants/{userId}
+  await upsertGroupCallParticipant(callId, user, {
+    status: 'left',
+    isMuted: true,
+    isVideoOff: true,
+  });
+
   const ref = doc(db, 'groupCalls', callId);
   try {
     const snap = await getDoc(ref);
@@ -663,10 +775,10 @@ export async function leaveGroupCallPermanent(
     const current = mapGroupCallDoc(snap.id, snap.data() as Record<string, unknown>);
     if (current.status === 'ended') return {ended: true, callDoc: current};
 
-    const nextActive = forceEndForAll
-      ? []
-      : current.activeUids.filter((uid) => uid !== user.uid);
-    const shouldEnd = forceEndForAll || nextActive.length === 0;
+    // Creator leaving does NOT end the call if other members are still active;
+    // Call ends ONLY when everyone has left (nextActive.length === 0).
+    const nextActive = current.activeUids.filter((uid) => uid !== user.uid);
+    const shouldEnd = nextActive.length === 0;
     const finalDur = Math.max(current.durationSec, Math.round(elapsedSec));
 
     await updateDoc(ref, {
@@ -722,9 +834,9 @@ export function subscribeIncomingGroupCalls(
       const active = snap.docs
         .map((d) => mapGroupCallDoc(d.id, d.data() as Record<string, unknown>))
         .filter((c) => {
-          if (c.status === 'ended') return false;
+          if (c.status === 'ended' || c.activeUids.length === 0) return false;
           const ageMs = now - new Date(c.startedAt).getTime();
-          // Ignore stale ringing calls older than 4 hours
+          // Ignore stale calls older than 4 hours
           return ageMs < 4 * 60 * 60 * 1000;
         })
         .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
@@ -776,7 +888,12 @@ export async function sendGroupCallSignal(params: {
   sdpMLineIndex?: number;
 }): Promise<void> {
   if (!params.fromUid || !params.toUid || params.fromUid === params.toUid) return;
-  const sigId = makeId('gsig');
+  const rand =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID().replace(/-/g, '').slice(0, 8)
+      : Math.random().toString(36).slice(2, 10);
+  // Per-pair signal doc ID prefixed with {from}_{to} inside groupCalls/{callId}/signals/
+  const sigId = `${params.fromUid.slice(0, 28)}_${params.toUid.slice(0, 28)}_${params.kind}_${Date.now().toString(36)}_${rand}`;
   const pair = [params.fromUid, params.toUid].sort();
   try {
     await setDoc(doc(db, 'groupCalls', params.callId, 'signals', sigId), {
