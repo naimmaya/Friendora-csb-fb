@@ -32,6 +32,8 @@ export const firebaseApp = initializeApp(firebaseConfig);
 export const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(firebaseApp);
 export const storage = getStorage(firebaseApp);
+storage.maxUploadRetryTime = 6000;
+storage.maxOperationRetryTime = 6000;
 
 // Enforce browserLocalPersistence so users remain logged in after closing and reopening the app
 export const authPersistenceReady: Promise<void> = setPersistence(

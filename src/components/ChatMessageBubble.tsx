@@ -1,14 +1,16 @@
-import {useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import {
   Check,
   CheckCheck,
   Download,
   ExternalLink,
   FileText,
+  Image as ImageIcon,
   MapPin,
-  Mic,
+  Pause,
   Phone,
   PhoneMissed,
+  Play,
   Video,
   X,
 } from 'lucide-react';
@@ -44,10 +46,167 @@ interface ChatMessageBubbleProps {
   onCallBack?: (type: 'audio' | 'video') => void;
 }
 
+// Global voice playback coordinator: playing one voice message automatically pauses any other!
+let currentlyPlayingAudio: HTMLAudioElement | null = null;
+
+const VOICE_BAR_HEIGHTS = [
+  32, 55, 42, 78, 92, 60, 48, 84, 70, 38, 64, 96, 74, 52, 44, 88, 68, 40, 76, 58, 36, 62, 46, 30,
+];
+
 function formatSec(sec: number): string {
-  const m = Math.floor(sec / 60);
-  const s = Math.max(0, Math.round(sec % 60));
+  const safe = Math.max(0, Math.round(sec || 0));
+  const m = Math.floor(safe / 60);
+  const s = safe % 60;
   return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function VoiceMessagePlayer({
+  src,
+  durationHintSec,
+  mine,
+}: {
+  src: string;
+  durationHintSec?: number;
+  mine: boolean;
+}) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState<number>(durationHintSec || 0);
+  const [loadFailed, setLoadFailed] = useState(false);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    return () => {
+      if (audio) {
+        audio.pause();
+        if (currentlyPlayingAudio === audio) {
+          currentlyPlayingAudio = null;
+        }
+      }
+    };
+  }, []);
+
+  async function togglePlay() {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (isPlaying) {
+      audio.pause();
+      return;
+    }
+    if (currentlyPlayingAudio && currentlyPlayingAudio !== audio) {
+      currentlyPlayingAudio.pause();
+    }
+    currentlyPlayingAudio = audio;
+    try {
+      await audio.play();
+    } catch {
+      setLoadFailed(true);
+    }
+  }
+
+  function handleSeek(barIndex: number) {
+    const audio = audioRef.current;
+    const total = duration || durationHintSec || 0;
+    if (!audio || !total) return;
+    const target = ((barIndex + 0.5) / VOICE_BAR_HEIGHTS.length) * total;
+    audio.currentTime = Math.max(0, Math.min(total, target));
+    setCurrentTime(audio.currentTime);
+  }
+
+  const effectiveDuration = duration > 0 ? duration : durationHintSec || 0;
+  const progressRatio =
+    effectiveDuration > 0 ? Math.min(1, currentTime / effectiveDuration) : 0;
+
+  return (
+    <div className="flex items-center gap-2.5 min-w-[215px] max-w-[270px]">
+      <audio
+        ref={audioRef}
+        src={src}
+        preload="metadata"
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => {
+          setIsPlaying(false);
+          if (currentlyPlayingAudio === audioRef.current) {
+            currentlyPlayingAudio = null;
+          }
+        }}
+        onEnded={() => {
+          setIsPlaying(false);
+          setCurrentTime(0);
+          if (currentlyPlayingAudio === audioRef.current) {
+            currentlyPlayingAudio = null;
+          }
+        }}
+        onTimeUpdate={(e) => {
+          setCurrentTime(e.currentTarget.currentTime);
+        }}
+        onLoadedMetadata={(e) => {
+          const d = e.currentTarget.duration;
+          if (Number.isFinite(d) && d > 0) setDuration(d);
+        }}
+        onError={() => setLoadFailed(true)}
+      />
+
+      {/* Play / Pause Button */}
+      <button
+        type="button"
+        disabled={loadFailed}
+        onClick={() => void togglePlay()}
+        aria-label={isPlaying ? 'Pause voice message' : 'Play voice message'}
+        className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 transition-transform active:scale-95 cursor-pointer ${
+          mine
+            ? 'bg-white text-[#1877F2]'
+            : 'bg-[#1877F2] text-white'
+        }`}
+      >
+        {isPlaying ? (
+          <Pause className="w-4 h-4 fill-current" />
+        ) : (
+          <Play className="w-4 h-4 fill-current ml-0.5" />
+        )}
+      </button>
+
+      {/* Interactive Waveform */}
+      <div className="flex-1 flex items-center gap-[2.5px] h-7 cursor-pointer">
+        {VOICE_BAR_HEIGHTS.map((h, idx) => {
+          const barFraction = (idx + 1) / VOICE_BAR_HEIGHTS.length;
+          const active = barFraction <= progressRatio;
+          return (
+            <button
+              key={idx}
+              type="button"
+              onClick={() => handleSeek(idx)}
+              aria-label={`Seek voice note to ${Math.round(barFraction * 100)}%`}
+              className="flex-1 h-full flex items-center justify-center cursor-pointer"
+            >
+              <span
+                className={`w-[3px] rounded-full transition-colors ${
+                  mine
+                    ? active
+                      ? 'bg-white'
+                      : 'bg-white/40'
+                    : active
+                      ? 'bg-[#1877F2] dark:bg-[#60A5FA]'
+                      : 'bg-[#CBD5E1] dark:bg-[#475569]'
+                }`}
+                style={{height: `${h}%`}}
+              />
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Duration */}
+      <span
+        className={`text-[11px] font-semibold tabular-nums shrink-0 ${
+          mine ? 'text-white/95' : 'text-[#475569] dark:text-[#CBD5E1]'
+        }`}
+      >
+        {isPlaying || currentTime > 0 ? formatSec(currentTime) : formatSec(effectiveDuration)}
+      </span>
+    </div>
+  );
 }
 
 export function ChatMessageBubble({
@@ -56,7 +215,37 @@ export function ChatMessageBubble({
   onCallBack,
 }: ChatMessageBubbleProps) {
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [imgFailed, setImgFailed] = useState(false);
   const resolvedMedia = useResolvedMediaUrl(message.mediaUrl || null);
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [resolvedMedia]);
+
+  async function handleDownloadPhoto() {
+    if (!resolvedMedia) return;
+    try {
+      const response = await fetch(resolvedMedia);
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = message.mediaName || `verve_photo_${Date.now()}.jpg`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1500);
+    } catch {
+      const a = document.createElement('a');
+      a.href = resolvedMedia;
+      a.download = message.mediaName || `verve_photo_${Date.now()}.jpg`;
+      a.target = '_blank';
+      a.rel = 'noreferrer';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+  }
 
   if (message.messageType === 'system') {
     return (
@@ -146,21 +335,25 @@ export function ChatMessageBubble({
           {/* IMAGE */}
           {message.messageType === 'image' && (
             <div className="rounded-2xl overflow-hidden border border-[#E5E8EE] dark:border-[#252A34] bg-[#0F1115] max-w-[260px]">
-              {resolvedMedia ? (
+              {resolvedMedia && !imgFailed ? (
                 <button
                   type="button"
                   onClick={() => setLightboxOpen(true)}
-                  className="block cursor-pointer"
+                  className="block cursor-pointer w-full"
                 >
                   <img
                     src={resolvedMedia}
                     alt={message.mediaName || 'Shared photo'}
                     referrerPolicy="no-referrer"
+                    onError={() => setImgFailed(true)}
                     className="w-full max-h-64 object-cover block"
                   />
                 </button>
               ) : (
-                <div className="w-56 h-40 animate-pulse bg-[#1E222B]" />
+                <div className="w-52 h-36 bg-[#1E222B] flex flex-col items-center justify-center gap-1.5 text-[#94A3B8] text-xs px-3 text-center">
+                  <ImageIcon className="w-5 h-5" />
+                  <span>{imgFailed ? 'Photo unavailable' : 'Loading photo...'}</span>
+                </div>
               )}
               {message.content && (
                 <p className={`px-3 py-2 text-xs ${bubbleClasses}`}>{message.content}</p>
@@ -188,25 +381,17 @@ export function ChatMessageBubble({
             </div>
           )}
 
-          {/* VOICE MESSAGE */}
+          {/* VOICE MESSAGE (Facebook Messenger Play + Waveform + Duration Bubble) */}
           {message.messageType === 'voice' && (
-            <div className={`px-3 py-2.5 rounded-2xl ${bubbleClasses} min-w-[220px] max-w-[280px]`}>
-              <div className="flex items-center gap-2 mb-1.5">
-                <Mic className="w-3.5 h-3.5 shrink-0" />
-                <span className="text-[11px] font-semibold">
-                  Voice message
-                  {message.voiceDurationSec ? ` · ${formatSec(message.voiceDurationSec)}` : ''}
-                </span>
-              </div>
+            <div className={`px-3 py-2.5 rounded-2xl ${bubbleClasses}`}>
               {resolvedMedia ? (
-                <audio
+                <VoiceMessagePlayer
                   src={resolvedMedia}
-                  controls
-                  preload="metadata"
-                  className="w-full h-8 max-w-full"
+                  durationHintSec={message.voiceDurationSec}
+                  mine={message.mine}
                 />
               ) : (
-                <span className="text-xs opacity-80">Audio clip</span>
+                <span className="text-xs opacity-80">Voice message</span>
               )}
             </div>
           )}
@@ -319,24 +504,38 @@ export function ChatMessageBubble({
         </div>
       </div>
 
-      {/* Fullscreen Image Lightbox */}
+      {/* Fullscreen Image Lightbox with Download & Close */}
       {lightboxOpen && resolvedMedia && (
         <div
           onClick={() => setLightboxOpen(false)}
-          className="fixed inset-0 z-[130] bg-black/90 flex items-center justify-center p-4"
+          className="fixed inset-0 z-[130] bg-black/92 flex items-center justify-center p-4"
         >
-          <button
-            type="button"
-            onClick={() => setLightboxOpen(false)}
-            aria-label="Close image preview"
-            className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/15 hover:bg-white/25 text-white flex items-center justify-center cursor-pointer"
+          <div
+            className="absolute top-4 right-4 flex items-center gap-2"
+            onClick={(e) => e.stopPropagation()}
           >
-            <X className="w-5 h-5" />
-          </button>
+            <button
+              type="button"
+              onClick={() => void handleDownloadPhoto()}
+              aria-label="Download photo"
+              className="h-10 px-3.5 rounded-full bg-white/15 hover:bg-white/25 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <Download className="w-4 h-4" />
+              <span>Download</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setLightboxOpen(false)}
+              aria-label="Close image preview"
+              className="w-10 h-10 rounded-full bg-white/15 hover:bg-white/25 text-white flex items-center justify-center cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
           <img
             src={resolvedMedia}
             alt={message.mediaName || 'Photo'}
-            className="max-w-full max-h-[88vh] rounded-xl object-contain"
+            className="max-w-full max-h-[85vh] rounded-xl object-contain"
             onClick={(e) => e.stopPropagation()}
           />
         </div>

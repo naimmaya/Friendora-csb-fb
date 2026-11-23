@@ -757,6 +757,7 @@ export function GroupChatWindow({
 
           {/* Messenger-style Input Bar */}
           <ChatInputBar
+            chatId={group.id}
             uploadFolder={`group_chats/${group.id}`}
             placeholder={`Message ${group.name}...`}
             onSend={handleSendGroupPayload}

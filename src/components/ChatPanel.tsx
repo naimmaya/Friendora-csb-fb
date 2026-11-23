@@ -352,6 +352,11 @@ export function ChatConversationWindow({
 
       {/* Messenger-style Input: [Emoji] [Message] [Attach] [Camera] [Mic/Send] */}
       <ChatInputBar
+        chatId={
+          currentUser.uid && peer.uid
+            ? [currentUser.uid, peer.uid].sort().join('_')
+            : `${currentUser.id}_${peer.id}`
+        }
         uploadFolder={`direct_chats/${currentUser.uid || 'user'}`}
         placeholder="Message..."
         compact={compact}

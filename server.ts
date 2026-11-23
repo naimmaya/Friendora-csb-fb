@@ -1786,10 +1786,13 @@ app.post('/api/auth/reset-password', (req: Request, res: Response) => {
 });
 
 // =======================
-// UPLOAD ROUTES (IMAGES & VIDEOS)
+// UPLOAD ROUTES (IMAGES, VIDEOS, VOICE NOTES & DOCUMENTS)
 // =======================
 
-const MIME_EXT_MAP: Record<string, {ext: string; mediaType: 'image' | 'video'}> = {
+const MIME_EXT_MAP: Record<
+  string,
+  {ext: string; mediaType: 'image' | 'video' | 'voice' | 'document'}
+> = {
   'image/png': {ext: 'png', mediaType: 'image'},
   'image/jpeg': {ext: 'jpg', mediaType: 'image'},
   'image/jpg': {ext: 'jpg', mediaType: 'image'},
@@ -1797,20 +1800,142 @@ const MIME_EXT_MAP: Record<string, {ext: string; mediaType: 'image' | 'video'}> 
   'image/gif': {ext: 'gif', mediaType: 'image'},
   'image/avif': {ext: 'avif', mediaType: 'image'},
   'image/bmp': {ext: 'bmp', mediaType: 'image'},
+  'image/heic': {ext: 'heic', mediaType: 'image'},
+  'image/heif': {ext: 'heif', mediaType: 'image'},
   'video/mp4': {ext: 'mp4', mediaType: 'video'},
   'video/webm': {ext: 'webm', mediaType: 'video'},
   'video/quicktime': {ext: 'mov', mediaType: 'video'},
   'video/ogg': {ext: 'ogv', mediaType: 'video'},
   'video/x-m4v': {ext: 'm4v', mediaType: 'video'},
   'video/3gpp': {ext: '3gp', mediaType: 'video'},
+  'video/x-matroska': {ext: 'mkv', mediaType: 'video'},
+  'audio/mp4': {ext: 'm4a', mediaType: 'voice'},
+  'audio/m4a': {ext: 'm4a', mediaType: 'voice'},
+  'audio/x-m4a': {ext: 'm4a', mediaType: 'voice'},
+  'audio/aac': {ext: 'aac', mediaType: 'voice'},
+  'audio/webm': {ext: 'webm', mediaType: 'voice'},
+  'audio/ogg': {ext: 'ogg', mediaType: 'voice'},
+  'audio/mpeg': {ext: 'mp3', mediaType: 'voice'},
+  'audio/wav': {ext: 'wav', mediaType: 'voice'},
+  'audio/x-wav': {ext: 'wav', mediaType: 'voice'},
+  'application/pdf': {ext: 'pdf', mediaType: 'document'},
+  'text/plain': {ext: 'txt', mediaType: 'document'},
+  'text/csv': {ext: 'csv', mediaType: 'document'},
+  'application/zip': {ext: 'zip', mediaType: 'document'},
+  'application/msword': {ext: 'doc', mediaType: 'document'},
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': {
+    ext: 'docx',
+    mediaType: 'document',
+  },
+  'application/vnd.ms-excel': {ext: 'xls', mediaType: 'document'},
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': {
+    ext: 'xlsx',
+    mediaType: 'document',
+  },
+  'application/vnd.ms-powerpoint': {ext: 'ppt', mediaType: 'document'},
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': {
+    ext: 'pptx',
+    mediaType: 'document',
+  },
+  'application/octet-stream': {ext: 'bin', mediaType: 'document'},
 };
 
-// Raw binary upload for large photos and videos (up to 60 MB, no base64 overhead)
+const firebaseUploadTokenCache = new Map<string, {uid: string; expiresAt: number}>();
+
+async function verifyUploadAuth(
+  req: AuthedRequest,
+): Promise<{actorId: string} | null> {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  if (!token) return null;
+
+  // 1. Check legacy SQLite session token
+  const sessionUser = getUserByToken(token);
+  if (sessionUser) {
+    req.user = sessionUser;
+    req.token = token;
+    return {actorId: String(sessionUser.id)};
+  }
+
+  // 2. Check cached Firebase ID token
+  const cached = firebaseUploadTokenCache.get(token);
+  if (cached && cached.expiresAt > Date.now()) {
+    return {actorId: cached.uid};
+  }
+
+  // 3. Verify Firebase ID token via Firebase Identity Toolkit accounts:lookup
+  if (FIREBASE_WEB_API_KEY && token.split('.').length === 3) {
+    try {
+      const resp = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_WEB_API_KEY)}`,
+        {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({idToken: token}),
+        },
+      );
+      if (resp.ok) {
+        const data = (await resp.json().catch(() => ({}))) as {
+          users?: Array<{localId?: string}>;
+        };
+        const uid = data.users?.[0]?.localId;
+        if (uid) {
+          firebaseUploadTokenCache.set(token, {
+            uid,
+            expiresAt: Date.now() + 5 * 60 * 1000,
+          });
+          // Prune cache occasionally
+          if (firebaseUploadTokenCache.size > 300) {
+            const now = Date.now();
+            for (const [k, v] of firebaseUploadTokenCache.entries()) {
+              if (v.expiresAt <= now) firebaseUploadTokenCache.delete(k);
+            }
+          }
+          return {actorId: uid};
+        }
+      }
+    } catch {
+      // Ignore network errors and fail closed below
+    }
+  }
+
+  return null;
+}
+
+function sanitizeUploadFolder(raw: string): string {
+  const segments = String(raw || '')
+    .split('/')
+    .map((seg) => seg.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64))
+    .filter(Boolean)
+    .slice(0, 3);
+  return segments.join('/');
+}
+
+// Raw binary upload for photos, videos (up to 100 MB), voice notes, and documents
 app.post(
   '/api/upload/media',
-  requireAuth,
-  express.raw({type: ['image/*', 'video/*', 'application/octet-stream'], limit: '60mb'}),
-  (req: AuthedRequest, res: Response) => {
+  express.raw({
+    type: [
+      'image/*',
+      'video/*',
+      'audio/*',
+      'application/pdf',
+      'application/zip',
+      'application/msword',
+      'application/vnd.*',
+      'text/plain',
+      'text/csv',
+      'application/octet-stream',
+    ],
+    limit: '105mb',
+  }),
+  async (req: AuthedRequest, res: Response) => {
+    const verified = await verifyUploadAuth(req);
+    if (!verified) {
+      res.status(401).json({error: 'Authentication required. Please sign in.'});
+      return;
+    }
+
     const contentType = String(req.headers['content-type'] || '')
       .split(';')[0]
       .trim()
@@ -1819,12 +1944,20 @@ app.post(
       .split(';')[0]
       .trim()
       .toLowerCase();
-    const mime = MIME_EXT_MAP[contentType] ? contentType : fallbackMime;
+    const mime =
+      contentType && contentType !== 'application/octet-stream' && MIME_EXT_MAP[contentType]
+        ? contentType
+        : MIME_EXT_MAP[fallbackMime]
+          ? fallbackMime
+          : MIME_EXT_MAP[contentType]
+            ? contentType
+            : '';
     const mapped = MIME_EXT_MAP[mime];
 
     if (!mapped) {
       res.status(400).json({
-        error: 'Unsupported media format. Please upload JPG, PNG, WEBP, GIF, MP4, WEBM, or MOV.',
+        error:
+          'Unsupported file format. Please upload JPG, PNG, WEBP, GIF, MP4, WEBM, MOV, M4A, MP3, or PDF.',
       });
       return;
     }
@@ -1834,18 +1967,34 @@ app.post(
       res.status(400).json({error: 'Uploaded file is empty.'});
       return;
     }
-    if (buffer.length > 60 * 1024 * 1024) {
-      res.status(413).json({error: 'File is too large (max 60 MB).'});
+    if (buffer.length > 100 * 1024 * 1024) {
+      res.status(413).json({error: 'Video too large (max 100 MB).'});
       return;
     }
 
-    const prefix = mapped.mediaType === 'video' ? 'vid' : 'img';
-    const filename = `${prefix}_${req.user!.id}_${Date.now()}_${crypto.randomBytes(6).toString('hex')}.${mapped.ext}`;
-    fs.writeFileSync(path.join(uploadsDir, filename), buffer);
+    const requestedFolder = sanitizeUploadFolder(String(req.headers['x-upload-folder'] || ''));
+    const safeActor = verified.actorId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'user';
+    const prefix =
+      mapped.mediaType === 'video'
+        ? 'vid'
+        : mapped.mediaType === 'voice'
+          ? 'voice'
+          : mapped.mediaType === 'document'
+            ? 'doc'
+            : 'img';
+    const filename = `${prefix}_${safeActor}_${Date.now()}_${crypto.randomBytes(5).toString('hex')}.${mapped.ext}`;
+    const targetDir = requestedFolder ? path.join(uploadsDir, requestedFolder) : uploadsDir;
+    fs.mkdirSync(targetDir, {recursive: true});
+    fs.writeFileSync(path.join(targetDir, filename), buffer);
+
+    const publicUrl = requestedFolder
+      ? `/uploads/${requestedFolder}/${filename}`
+      : `/uploads/${filename}`;
 
     res.status(201).json({
-      url: `/uploads/${filename}`,
+      url: publicUrl,
       mediaType: mapped.mediaType,
+      size: buffer.length,
     });
   },
 );

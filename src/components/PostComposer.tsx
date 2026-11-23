@@ -1,17 +1,52 @@
-import {useRef, useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import type {ChangeEvent, FormEvent} from 'react';
-import {AlertCircle, CheckCircle2, ImagePlus, Loader2, Send, Video, X} from 'lucide-react';
+import {
+  AlertCircle,
+  CheckCircle2,
+  ImagePlus,
+  Loader2,
+  Play,
+  RotateCcw,
+  Send,
+  Video,
+  X,
+} from 'lucide-react';
 import {formatFirestoreErrorMessage} from '../lib/firebase';
 import {createPostPermanent} from '../lib/firestoreStore';
-import {uploadAttachmentReal} from '../lib/mediaUpload';
+import {
+  extractVideoMetadata,
+  formatFileSize,
+  formatMediaDuration,
+  MAX_VIDEO_BYTES,
+  MAX_VIDEO_DURATION_SEC,
+  uploadAttachmentReal,
+} from '../lib/mediaUpload';
 import type {PostItem, SocialPageDoc, UserProfile} from '../types';
-import {Avatar, useResolvedMediaUrl} from './MediaImage';
+import {Avatar} from './MediaImage';
 
 interface PostComposerProps {
   currentUser: UserProfile;
   postingAsPage?: SocialPageDoc | null;
   onPostCreated: (post: PostItem) => void;
   onOpenProfile: (userId: number) => void;
+}
+
+interface PendingPostMedia {
+  kind: 'image' | 'video';
+  file: File;
+  previewUrl: string;
+  durationSec?: number;
+  thumbnailDataUrl?: string | null;
+}
+
+function isVideoFile(file: File): boolean {
+  if (file.type.startsWith('video/')) return true;
+  return /\.(mp4|webm|mov|m4v|ogv|ogg|3gp|mkv)$/i.test(file.name);
+}
+
+function isImageFile(file: File): boolean {
+  if (file.type.startsWith('image/')) return true;
+  return /\.(jpg|jpeg|png|webp|gif|avif|bmp|heic|heif)$/i.test(file.name);
 }
 
 export function PostComposer({
@@ -21,88 +56,171 @@ export function PostComposer({
   onOpenProfile,
 }: PostComposerProps) {
   const [content, setContent] = useState('');
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [uploadingKind, setUploadingKind] = useState<'image' | 'video' | null>(null);
+  const [pendingMedia, setPendingMedia] = useState<PendingPostMedia | null>(null);
+  const [preparingMedia, setPreparingMedia] = useState(false);
+  const [videoPlayingPreview, setVideoPlayingPreview] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStage, setUploadStage] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [canRetry, setCanRetry] = useState(false);
   const [savedToast, setSavedToast] = useState<string | null>(null);
 
-  const photoInputRef = useRef<HTMLInputElement>(null);
-  const videoInputRef = useRef<HTMLInputElement>(null);
-
-  const resolvedImagePreview = useResolvedMediaUrl(imageUrl);
-  const resolvedVideoPreview = useResolvedMediaUrl(videoUrl);
+  const combinedInputRef = useRef<HTMLInputElement>(null);
+  const videoPreviewRef = useRef<HTMLVideoElement>(null);
 
   const firstName = currentUser.name.split(' ')[0] || 'there';
-  const uploading = uploadingKind !== null;
   const composerAvatar = postingAsPage ? postingAsPage.pagePhoto : currentUser.avatar_url;
   const composerName = postingAsPage ? postingAsPage.pageName : currentUser.name;
 
-  async function handleFileChange(e: ChangeEvent<HTMLInputElement>, expectedKind: 'image' | 'video') {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  useEffect(() => {
+    const url = pendingMedia?.previewUrl;
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [pendingMedia?.previewUrl]);
+
+  function clearMedia() {
+    setPendingMedia(null);
+    setVideoPlayingPreview(false);
     setError(null);
-    setSavedToast(null);
-    setUploadingKind(expectedKind);
-    try {
-      const uploaded = await uploadAttachmentReal(file, {
-        folder: postingAsPage
-          ? `pages/${postingAsPage.pageId}/posts`
-          : `posts/${currentUser.uid || 'user'}`,
-        kind: expectedKind,
-        fileName: file.name,
-      });
-      if (expectedKind === 'image') {
-        setVideoUrl(null);
-        setImageUrl(uploaded.url);
-      } else {
-        setImageUrl(null);
-        setVideoUrl(uploaded.url);
-      }
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : expectedKind === 'video'
-            ? 'Failed to upload video. Please try a smaller MP4/WEBM file.'
-            : 'Failed to prepare photo.',
-      );
-    } finally {
-      setUploadingKind(null);
-      if (photoInputRef.current) photoInputRef.current.value = '';
-      if (videoInputRef.current) videoInputRef.current.value = '';
-    }
+    setCanRetry(false);
   }
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    if (!content.trim() && !imageUrl && !videoUrl) return;
+  async function handleMediaPicked(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
     setError(null);
+    setCanRetry(false);
+    setSavedToast(null);
+    setVideoPlayingPreview(false);
+
+    if (isVideoFile(file)) {
+      if (file.size > MAX_VIDEO_BYTES) {
+        setError('Video too large (max 100MB / 60 sec).');
+        return;
+      }
+
+      setPreparingMedia(true);
+      try {
+        const meta = await extractVideoMetadata(file);
+        if (meta.durationSec > MAX_VIDEO_DURATION_SEC) {
+          setError(
+            `Video too large (${formatMediaDuration(meta.durationSec)} — max 100MB / 60 sec).`,
+          );
+          return;
+        }
+        const previewUrl = URL.createObjectURL(file);
+        setPendingMedia({
+          kind: 'video',
+          file,
+          previewUrl,
+          durationSec: meta.durationSec,
+          thumbnailDataUrl: meta.thumbnailDataUrl,
+        });
+      } finally {
+        setPreparingMedia(false);
+      }
+      return;
+    }
+
+    if (isImageFile(file)) {
+      const previewUrl = URL.createObjectURL(file);
+      setPendingMedia({
+        kind: 'image',
+        file,
+        previewUrl,
+      });
+      return;
+    }
+
+    setError('Please select a Photo (JPG, PNG, WEBP, GIF) or Video (MP4, WEBM, MOV).');
+  }
+
+  async function publishPost() {
+    if (submitting || preparingMedia) return;
+    if (!content.trim() && !pendingMedia) return;
+
+    setError(null);
+    setCanRetry(false);
     setSavedToast(null);
     setSubmitting(true);
+    setUploadProgress(0);
+
     try {
+      let uploadedImageUrl: string | null = null;
+      let uploadedVideoUrl: string | null = null;
+
+      if (pendingMedia) {
+        const ownerKey = postingAsPage
+          ? `pages/${postingAsPage.pageId}`
+          : currentUser.uid || 'user';
+
+        if (pendingMedia.kind === 'video') {
+          setUploadStage('Uploading video...');
+          const uploaded = await uploadAttachmentReal(pendingMedia.file, {
+            folder: postingAsPage
+              ? `pages/${postingAsPage.pageId}/post_videos`
+              : `post_videos/${ownerKey}`,
+            kind: 'video',
+            fileName: `${Date.now()}.mp4`,
+            onProgress: (pct) => setUploadProgress(pct),
+          });
+          uploadedVideoUrl = uploaded.url;
+          uploadedImageUrl = pendingMedia.thumbnailDataUrl || null;
+        } else {
+          setUploadStage('Uploading photo...');
+          const uploaded = await uploadAttachmentReal(pendingMedia.file, {
+            folder: postingAsPage
+              ? `pages/${postingAsPage.pageId}/post_images`
+              : `post_images/${ownerKey}`,
+            kind: 'image',
+            fileName: `${Date.now()}.jpg`,
+            onProgress: (pct) => setUploadProgress(pct),
+          });
+          uploadedImageUrl = uploaded.url;
+        }
+      }
+
+      setUploadStage('Saving post...');
       const post = await createPostPermanent(currentUser, {
         content: content.trim(),
-        imageUrl,
-        videoUrl,
+        imageUrl: uploadedImageUrl,
+        videoUrl: uploadedVideoUrl,
         page: postingAsPage,
       });
+
       setContent('');
-      setImageUrl(null);
-      setVideoUrl(null);
+      setPendingMedia(null);
+      setVideoPlayingPreview(false);
+      setUploadProgress(0);
+      setUploadStage(null);
       setSavedToast(
         postingAsPage
           ? `Published as ${postingAsPage.pageName} to Cloud Firestore.`
-          : 'Post saved permanently to Cloud Firestore.',
+          : uploadedVideoUrl
+            ? 'Video post published to Cloud Firestore.'
+            : 'Post saved permanently to Cloud Firestore.',
       );
       window.setTimeout(() => setSavedToast(null), 3500);
       onPostCreated(post);
     } catch (err) {
-      setError(formatFirestoreErrorMessage(err));
+      setCanRetry(true);
+      setError(
+        err instanceof Error ? formatFirestoreErrorMessage(err) : 'Post upload failed. Tap Retry.',
+      );
     } finally {
       setSubmitting(false);
+      setUploadStage(null);
+      setUploadProgress(0);
     }
+  }
+
+  function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    void publishPost();
   }
 
   return (
@@ -134,6 +252,7 @@ export function PostComposer({
             rows={2}
             maxLength={2000}
             value={content}
+            disabled={submitting}
             onChange={(e) => setContent(e.target.value)}
             placeholder={
               postingAsPage
@@ -143,62 +262,130 @@ export function PostComposer({
             className="w-full resize-none bg-[#F4F6F9] dark:bg-[#0E1014] rounded-xl px-3.5 py-2.5 text-[15px] text-[#0F172A] dark:text-[#F1F5F9] placeholder:text-[#64748B] dark:placeholder:text-[#94A3B8] focus:outline-none focus:ring-2 focus:ring-[#1877F2] dark:focus:ring-[#3B82F6]"
           />
 
-          {/* Photo preview */}
-          {imageUrl && (
+          {/* Reading video metadata indicator */}
+          {preparingMedia && (
+            <div className="mt-3 rounded-xl border border-[#E5E8EE] dark:border-[#252A34] bg-[#F4F6F9] dark:bg-[#0E1014] px-3.5 py-3 flex items-center gap-2 text-xs font-medium text-[#475569] dark:text-[#94A3B8]">
+              <Loader2 className="w-4 h-4 animate-spin text-[#1877F2]" />
+              <span>Preparing video preview...</span>
+            </div>
+          )}
+
+          {/* Photo preview (immediate, before upload) */}
+          {pendingMedia?.kind === 'image' && (
             <div className="relative mt-3 rounded-xl overflow-hidden border border-[#E5E8EE] dark:border-[#252A34] bg-[#0F1115]">
-              {resolvedImagePreview ? (
-                <img
-                  src={resolvedImagePreview}
-                  alt="Attached photo preview"
-                  referrerPolicy="no-referrer"
-                  className="w-full max-h-72 object-cover block"
-                />
-              ) : (
-                <div className="w-full h-44 animate-pulse bg-[#1E222B]" />
+              <img
+                src={pendingMedia.previewUrl}
+                alt="Attached photo preview"
+                className="w-full max-h-72 object-cover block"
+              />
+              {!submitting && (
+                <button
+                  type="button"
+                  onClick={clearMedia}
+                  aria-label="Remove attached photo"
+                  className="absolute top-2.5 right-2.5 w-8 h-8 rounded-full bg-black/75 hover:bg-black text-white flex items-center justify-center cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               )}
-              <button
-                type="button"
-                onClick={() => setImageUrl(null)}
-                aria-label="Remove attached photo"
-                className="absolute top-2.5 right-2.5 w-8 h-8 rounded-full bg-black/75 hover:bg-black text-white flex items-center justify-center cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
             </div>
           )}
 
-          {/* Video preview */}
-          {videoUrl && (
+          {/* Video preview (immediate Play button + duration + size like Facebook) */}
+          {pendingMedia?.kind === 'video' && (
             <div className="relative mt-3 rounded-xl overflow-hidden border border-[#E5E8EE] dark:border-[#252A34] bg-black">
-              {resolvedVideoPreview ? (
-                <video
-                  src={resolvedVideoPreview}
-                  controls
-                  playsInline
-                  muted
-                  className="w-full max-h-80 block mx-auto"
-                />
-              ) : (
-                <div className="w-full h-48 animate-pulse bg-[#1E222B]" />
+              <video
+                ref={videoPreviewRef}
+                src={pendingMedia.previewUrl}
+                poster={pendingMedia.thumbnailDataUrl || undefined}
+                controls={videoPlayingPreview}
+                playsInline
+                preload="metadata"
+                onPlay={() => setVideoPlayingPreview(true)}
+                onPause={() => setVideoPlayingPreview(false)}
+                className="w-full max-h-80 block mx-auto"
+              />
+
+              {!videoPlayingPreview && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setVideoPlayingPreview(true);
+                    void videoPreviewRef.current?.play().catch(() => {});
+                  }}
+                  aria-label="Preview video"
+                  className="absolute inset-0 flex items-center justify-center bg-black/30 hover:bg-black/40 transition-colors cursor-pointer"
+                >
+                  <span className="w-14 h-14 rounded-full bg-black/70 border border-white/30 text-white flex items-center justify-center shadow-lg">
+                    <Play className="w-6 h-6 fill-current ml-0.5" />
+                  </span>
+                </button>
               )}
-              <button
-                type="button"
-                onClick={() => setVideoUrl(null)}
-                aria-label="Remove attached video"
-                className="absolute top-2.5 right-2.5 w-8 h-8 rounded-full bg-black/75 hover:bg-black text-white flex items-center justify-center cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
+
+              {/* Duration + Size badge */}
+              <div className="absolute bottom-2.5 left-2.5 flex items-center gap-1.5 pointer-events-none">
+                {pendingMedia.durationSec ? (
+                  <span className="px-2 py-0.5 rounded-md bg-black/75 text-white text-[11px] font-semibold tabular-nums">
+                    {formatMediaDuration(pendingMedia.durationSec)}
+                  </span>
+                ) : null}
+                <span className="px-2 py-0.5 rounded-md bg-black/75 text-white/90 text-[11px] font-medium tabular-nums">
+                  {formatFileSize(pendingMedia.file.size)}
+                </span>
+              </div>
+
+              {!submitting && (
+                <button
+                  type="button"
+                  onClick={clearMedia}
+                  aria-label="Remove attached video"
+                  className="absolute top-2.5 right-2.5 w-8 h-8 rounded-full bg-black/75 hover:bg-black text-white flex items-center justify-center cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
             </div>
           )}
 
+          {/* Real 0% - 100% Upload Progress Bar */}
+          {submitting && uploadStage && (
+            <div className="mt-3 rounded-xl bg-[#1877F2]/8 dark:bg-[#3B82F6]/15 border border-[#1877F2]/20 px-3.5 py-2.5 space-y-1.5">
+              <div className="flex items-center justify-between text-xs font-semibold text-[#1877F2] dark:text-[#60A5FA]">
+                <span className="inline-flex items-center gap-2">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>{uploadStage}</span>
+                </span>
+                <span className="tabular-nums">{uploadProgress}%</span>
+              </div>
+              <div className="h-2 w-full rounded-full bg-[#1877F2]/20 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-[#1877F2] dark:bg-[#60A5FA] transition-all duration-150"
+                  style={{width: `${Math.max(4, uploadProgress)}%`}}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Real Error Banner with Retry button */}
           {error && (
             <div
               role="alert"
-              className="mt-2.5 flex items-start gap-2 rounded-xl bg-[#FEF2F2] dark:bg-[#3B181A] border border-[#FECACA] dark:border-[#7F1D1D] px-3 py-2 text-xs font-medium text-[#B91C1C] dark:text-[#FCA5A5]"
+              className="mt-2.5 flex items-center justify-between gap-2 rounded-xl bg-[#FEF2F2] dark:bg-[#3B181A] border border-[#FECACA] dark:border-[#7F1D1D] px-3 py-2 text-xs font-medium text-[#B91C1C] dark:text-[#FCA5A5]"
             >
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>{error}</span>
+              <span className="flex items-start gap-2 min-w-0">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{error}</span>
+              </span>
+              {canRetry && !submitting && (
+                <button
+                  type="button"
+                  onClick={() => void publishPost()}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#DC2626] hover:bg-[#B91C1C] text-white text-xs font-semibold shrink-0 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Retry</span>
+                </button>
+              )}
             </div>
           )}
 
@@ -215,45 +402,23 @@ export function PostComposer({
           <div className="mt-3 pt-3 border-t border-[#E5E8EE] dark:border-[#252A34] flex items-center justify-between gap-2 flex-wrap">
             <div className="flex items-center gap-1 sm:gap-2">
               <input
-                ref={photoInputRef}
+                ref={combinedInputRef}
                 type="file"
-                accept="image/*"
-                onChange={(e) => handleFileChange(e, 'image')}
+                accept="image/*,video/*"
+                onChange={handleMediaPicked}
                 className="hidden"
               />
               <button
                 type="button"
-                disabled={uploading}
-                onClick={() => photoInputRef.current?.click()}
-                className="inline-flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-2 rounded-xl text-xs sm:text-sm font-medium text-[#334155] dark:text-[#CBD5E1] hover:bg-[#F4F6F9] dark:hover:bg-[#1E232D] transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
+                disabled={submitting || preparingMedia}
+                onClick={() => combinedInputRef.current?.click()}
+                className="inline-flex items-center gap-1.5 sm:gap-2 px-3 py-2 rounded-xl text-xs sm:text-sm font-medium text-[#334155] dark:text-[#CBD5E1] hover:bg-[#F4F6F9] dark:hover:bg-[#1E232D] transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
               >
-                {uploadingKind === 'image' ? (
-                  <Loader2 className="w-4 h-4 animate-spin text-[#16A34A]" />
-                ) : (
+                <span className="inline-flex items-center gap-1">
                   <ImagePlus className="w-4 h-4 text-[#16A34A]" />
-                )}
-                <span>{uploadingKind === 'image' ? 'Uploading...' : 'Photo'}</span>
-              </button>
-
-              <input
-                ref={videoInputRef}
-                type="file"
-                accept="video/*"
-                onChange={(e) => handleFileChange(e, 'video')}
-                className="hidden"
-              />
-              <button
-                type="button"
-                disabled={uploading}
-                onClick={() => videoInputRef.current?.click()}
-                className="inline-flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-2 rounded-xl text-xs sm:text-sm font-medium text-[#334155] dark:text-[#CBD5E1] hover:bg-[#F4F6F9] dark:hover:bg-[#1E232D] transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
-              >
-                {uploadingKind === 'video' ? (
-                  <Loader2 className="w-4 h-4 animate-spin text-[#E11D48]" />
-                ) : (
                   <Video className="w-4 h-4 text-[#E11D48]" />
-                )}
-                <span>{uploadingKind === 'video' ? 'Uploading...' : 'Video'}</span>
+                </span>
+                <span>Photo/Video</span>
               </button>
             </div>
 
@@ -265,11 +430,11 @@ export function PostComposer({
               )}
               <button
                 type="submit"
-                disabled={submitting || uploading || (!content.trim() && !imageUrl && !videoUrl)}
+                disabled={submitting || preparingMedia || (!content.trim() && !pendingMedia)}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] dark:bg-[#2563EB] dark:hover:bg-[#1D4ED8] text-white text-sm font-semibold transition-all active:scale-[0.985] disabled:opacity-50 whitespace-nowrap cursor-pointer"
               >
                 {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                <span>{submitting ? 'Saving...' : 'Post'}</span>
+                <span>{submitting ? `${uploadProgress || 0}%` : 'Post'}</span>
               </button>
             </div>
           </div>

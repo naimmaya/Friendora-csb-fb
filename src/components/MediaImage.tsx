@@ -1,5 +1,13 @@
-import {useEffect, useState} from 'react';
-import {Film, Image as ImageIcon} from 'lucide-react';
+import {useEffect, useRef, useState} from 'react';
+import {
+  Film,
+  Image as ImageIcon,
+  Maximize2,
+  Pause,
+  Play,
+  Volume2,
+  VolumeX,
+} from 'lucide-react';
 import {getInitials} from '../lib/api';
 import {resolveMediaUrl} from '../lib/localFallback';
 
@@ -164,18 +172,78 @@ export function PostPhoto({src, alt}: PostPhotoProps) {
   );
 }
 
+function formatVideoTime(sec: number): string {
+  const safe = Math.max(0, Math.floor(sec || 0));
+  const m = Math.floor(safe / 60);
+  const s = safe % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 interface PostVideoProps {
   src: string;
+  poster?: string | null;
   className?: string;
 }
 
-export function PostVideo({src, className = ''}: PostVideoProps) {
+export function PostVideo({src, poster, className = ''}: PostVideoProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const [failed, setFailed] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+
   const resolvedSrc = useResolvedMediaUrl(src);
+  const resolvedPoster = useResolvedMediaUrl(poster || null);
 
   useEffect(() => {
     setFailed(false);
+    setPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
   }, [resolvedSrc]);
+
+  async function togglePlay() {
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused || v.ended) {
+      try {
+        await v.play();
+      } catch {
+        // Fallback: mute and retry if browser autoplay policy requires it
+        v.muted = true;
+        setMuted(true);
+        await v.play().catch(() => {});
+      }
+    } else {
+      v.pause();
+    }
+  }
+
+  function toggleMute() {
+    const v = videoRef.current;
+    if (!v) return;
+    v.muted = !v.muted;
+    setMuted(v.muted);
+  }
+
+  function toggleFullscreen() {
+    const v = videoRef.current as
+      | (HTMLVideoElement & {webkitEnterFullscreen?: () => void})
+      | null;
+    const container = containerRef.current;
+    if (!v) return;
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => {});
+    } else if (container?.requestFullscreen) {
+      void container.requestFullscreen().catch(() => {
+        if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();
+      });
+    } else if (v.webkitEnterFullscreen) {
+      v.webkitEnterFullscreen();
+    }
+  }
 
   if (failed) {
     return (
@@ -192,18 +260,105 @@ export function PostVideo({src, className = ''}: PostVideoProps) {
     );
   }
 
+  const progressPct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+
   return (
     <div
-      className={`w-full bg-black overflow-hidden border-y border-[#E5E8EE] dark:border-[#252A34] ${className}`}
+      ref={containerRef}
+      className={`relative w-full bg-black overflow-hidden border-y border-[#E5E8EE] dark:border-[#252A34] group ${className}`}
     >
       <video
+        ref={videoRef}
         src={resolvedSrc}
-        controls
+        poster={resolvedPoster || undefined}
         playsInline
         preload="metadata"
+        onClick={() => void togglePlay()}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+        onLoadedMetadata={(e) => {
+          const d = e.currentTarget.duration;
+          if (Number.isFinite(d) && d > 0) setDuration(d);
+        }}
+        onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
         onError={() => setFailed(true)}
-        className="w-full max-h-[540px] mx-auto block"
+        className="w-full max-h-[540px] mx-auto block cursor-pointer"
       />
+
+      {/* Centered Play Overlay when paused */}
+      {!playing && (
+        <button
+          type="button"
+          onClick={() => void togglePlay()}
+          aria-label="Play video"
+          className="absolute inset-0 flex items-center justify-center bg-black/25 hover:bg-black/35 transition-colors cursor-pointer"
+        >
+          <span className="w-16 h-16 rounded-full bg-black/70 border border-white/30 text-white flex items-center justify-center shadow-xl">
+            <Play className="w-7 h-7 fill-current ml-1" />
+          </span>
+        </button>
+      )}
+
+      {/* Facebook-style Bottom Controls: Play/Pause, Scrubber, Duration, Mute/Unmute, Fullscreen */}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/45 to-transparent px-3 pt-6 pb-2.5 flex items-center gap-2.5 text-white"
+      >
+        <button
+          type="button"
+          onClick={() => void togglePlay()}
+          aria-label={playing ? 'Pause video' : 'Play video'}
+          className="w-8 h-8 rounded-full hover:bg-white/15 flex items-center justify-center shrink-0 cursor-pointer"
+        >
+          {playing ? (
+            <Pause className="w-4 h-4 fill-current" />
+          ) : (
+            <Play className="w-4 h-4 fill-current ml-0.5" />
+          )}
+        </button>
+
+        {/* Seek bar */}
+        <input
+          type="range"
+          min={0}
+          max={duration || 100}
+          step={0.1}
+          value={currentTime}
+          aria-label="Seek video"
+          onChange={(e) => {
+            const next = Number(e.target.value);
+            if (videoRef.current) videoRef.current.currentTime = next;
+            setCurrentTime(next);
+          }}
+          style={{
+            background: `linear-gradient(to right, #3B82F6 ${progressPct}%, rgba(255,255,255,0.3) ${progressPct}%)`,
+          }}
+          className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer accent-[#3B82F6]"
+        />
+
+        <span className="text-[11px] font-medium tabular-nums shrink-0 text-white/90">
+          {formatVideoTime(currentTime)} / {formatVideoTime(duration)}
+        </span>
+
+        <button
+          type="button"
+          onClick={toggleMute}
+          aria-label={muted ? 'Unmute video' : 'Mute video'}
+          className="w-8 h-8 rounded-full hover:bg-white/15 flex items-center justify-center shrink-0 cursor-pointer"
+        >
+          {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+        </button>
+
+        <button
+          type="button"
+          onClick={toggleFullscreen}
+          aria-label="Full screen video"
+          className="w-8 h-8 rounded-full hover:bg-white/15 flex items-center justify-center shrink-0 cursor-pointer"
+        >
+          <Maximize2 className="w-4 h-4" />
+        </button>
+      </div>
     </div>
   );
 }

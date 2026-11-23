@@ -472,13 +472,13 @@ export function PostCard({
           </div>
         )}
 
-        {/* Photo */}
-        {post.image_url && (
+        {/* Photo (only when post is not a video post with thumbnail) */}
+        {post.image_url && !post.video_url && (
           <PostPhoto src={post.image_url} alt={`Photo shared by ${displayName}`} />
         )}
 
-        {/* Video */}
-        {post.video_url && <PostVideo src={post.video_url} />}
+        {/* Video (Facebook-style player with thumbnail poster, Play/Pause, Mute/Unmute, Full-screen) */}
+        {post.video_url && <PostVideo src={post.video_url} poster={post.image_url} />}
 
         {/* Engagement stats */}
         <div className="px-4 sm:px-5 py-2.5 flex items-center justify-between text-xs text-[#64748B] dark:text-[#94A3B8]">
