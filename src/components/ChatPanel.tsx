@@ -17,11 +17,13 @@ import {
 import {formatRelativeTime} from '../lib/api';
 import {formatFirestoreErrorMessage} from '../lib/firebase';
 import {deleteMessagePermanent} from '../lib/firestoreStore';
+import {formatCallParticipantsSummary} from '../lib/groupService';
 import type {
   CallType,
   ChatGroupDoc,
   ChatMessage,
   ConversationSummary,
+  GroupCallDoc,
   NotificationItem,
   PresenceRecord,
   UserProfile,
@@ -421,6 +423,8 @@ interface MessagesPageProps {
   friends: UserProfile[];
   conversations: ConversationSummary[];
   groups: ChatGroupDoc[];
+  activeGroupCalls?: GroupCallDoc[];
+  activeGroupCallId?: string | null;
   activePeer: UserProfile | null;
   activeGroupId: string | null;
   messagesByPeer: Record<number, ChatMessage[]>;
@@ -434,6 +438,7 @@ interface MessagesPageProps {
   onOpenProfile: (userId: number) => void;
   onStartCall?: (peer: UserProfile, type: CallType) => void;
   onStartGroupCall: (group: ChatGroupDoc, type: CallType) => void;
+  onJoinGroupCall: (call: GroupCallDoc) => void;
   initialListMode?: 'direct' | 'groups';
 }
 
@@ -443,6 +448,8 @@ export function MessagesPage({
   friends,
   conversations,
   groups,
+  activeGroupCalls = [],
+  activeGroupCallId = null,
   activePeer,
   activeGroupId,
   messagesByPeer,
@@ -456,6 +463,7 @@ export function MessagesPage({
   onOpenProfile,
   onStartCall,
   onStartGroupCall,
+  onJoinGroupCall,
   initialListMode,
 }: MessagesPageProps) {
   const [listMode, setListMode] = useState<'direct' | 'groups'>(
@@ -472,6 +480,20 @@ export function MessagesPage({
   const onlineSet = new Set(onlineUserIds);
   const selectedPeer = activePeer || conversations[0]?.user || null;
   const selectedGroup = groups.find((g) => g.id === activeGroupId) || groups[0] || null;
+
+  const userByUid = new Map<string, UserProfile>();
+  if (currentUser.uid) userByUid.set(currentUser.uid, currentUser);
+  for (const u of allUsers) {
+    if (u.uid) userByUid.set(u.uid, u);
+  }
+
+  const ongoingCallByGroupId = new Map<string, GroupCallDoc>();
+  for (const c of activeGroupCalls) {
+    if (c.status !== 'ended' && c.activeUids.length > 0 && !ongoingCallByGroupId.has(c.groupId)) {
+      ongoingCallByGroupId.set(c.groupId, c);
+    }
+  }
+  const hasAnyOngoingGroupCall = ongoingCallByGroupId.size > 0;
 
   // Prefer friends first when picking members for a new group, then other verified users
   const groupCandidates = [
@@ -528,13 +550,16 @@ export function MessagesPage({
                     onSelectGroup(groups[0].id);
                   }
                 }}
-                className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer inline-flex items-center justify-center gap-1.5 ${
                   listMode === 'groups'
                     ? 'bg-white dark:bg-[#232732] text-[#0F172A] dark:text-white shadow-xs'
                     : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F172A] dark:hover:text-white'
                 }`}
               >
-                Groups ({groups.length})
+                {hasAnyOngoingGroupCall && (
+                  <span className="w-2 h-2 rounded-full bg-[#22C55E] animate-pulse shrink-0" />
+                )}
+                <span>Groups ({groups.length})</span>
               </button>
             </div>
           </div>
@@ -624,33 +649,85 @@ export function MessagesPage({
                 </div>
               ) : (
                 groups.map((grp) => {
-                  const isActive = activeGroupId === grp.id || (listMode === 'groups' && selectedGroup?.id === grp.id);
+                  const isActive =
+                    activeGroupId === grp.id || (listMode === 'groups' && selectedGroup?.id === grp.id);
+                  const liveCall = ongoingCallByGroupId.get(grp.id) || null;
+                  const liveCount = liveCall ? liveCall.activeUids.length : 0;
+                  const isInLiveCall = Boolean(liveCall && activeGroupCallId === liveCall.id);
                   return (
-                    <button
+                    <div
                       key={grp.id}
-                      type="button"
-                      onClick={() => onSelectGroup(grp.id)}
-                      className={`w-full px-4 py-3.5 flex items-center gap-3 text-left transition-colors cursor-pointer ${
+                      className={`transition-colors ${
                         isActive
                           ? 'bg-[#1877F2]/8 dark:bg-[#3B82F6]/15'
                           : 'hover:bg-[#F8FAFC] dark:hover:bg-[#1E222B]'
                       }`}
                     >
-                      <Avatar src={grp.photoUrl} name={grp.name} size="md" />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-sm font-semibold text-[#0F172A] dark:text-white truncate">
-                            {grp.name}
-                          </span>
-                          <span className="text-[11px] text-[#64748B] dark:text-[#94A3B8] tabular-nums shrink-0">
-                            {formatRelativeTime(grp.lastMessageAt)}
-                          </span>
+                      <button
+                        type="button"
+                        onClick={() => onSelectGroup(grp.id)}
+                        className="w-full px-4 py-3.5 flex items-center gap-3 text-left cursor-pointer"
+                      >
+                        <div className="relative shrink-0">
+                          <Avatar src={grp.photoUrl} name={grp.name} size="md" />
+                          {liveCall && (
+                            <span className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-[#22C55E] ring-2 ring-white dark:ring-[#16191F] animate-pulse" />
+                          )}
                         </div>
-                        <p className="text-xs text-[#64748B] dark:text-[#94A3B8] truncate mt-0.5">
-                          {grp.lastMessage || `${grp.memberUids.length} members`}
-                        </p>
-                      </div>
-                    </button>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-semibold text-[#0F172A] dark:text-white truncate">
+                              {grp.name}
+                            </span>
+                            <span className="text-[11px] text-[#64748B] dark:text-[#94A3B8] tabular-nums shrink-0">
+                              {formatRelativeTime(grp.lastMessageAt)}
+                            </span>
+                          </div>
+                          <p className="text-xs text-[#64748B] dark:text-[#94A3B8] truncate mt-0.5">
+                            {grp.lastMessage || `${grp.memberUids.length} members`}
+                          </p>
+                        </div>
+                      </button>
+
+                      {/* Facebook-style Live Group Call Green Banner inside Group List */}
+                      {liveCall && liveCount > 0 && (
+                        <div className="mx-3 mb-3 rounded-xl bg-gradient-to-r from-[#15803D] to-[#16A34A] px-3 py-2 text-white shadow-sm">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 text-[11px] font-bold">
+                                <span className="w-2 h-2 rounded-full bg-red-500 ring-1 ring-white/80 animate-pulse shrink-0" />
+                                <span className="truncate">
+                                  Group Call Choltese - {liveCount} jon ache
+                                </span>
+                              </div>
+                              <p className="text-[10px] text-emerald-50/95 truncate mt-0.5">
+                                {formatCallParticipantsSummary(
+                                  liveCall.activeUids,
+                                  userByUid,
+                                  liveCall.hostName,
+                                )}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onSelectGroup(grp.id);
+                                onJoinGroupCall(liveCall);
+                              }}
+                              className="inline-flex items-center gap-1 px-2.5 h-7 rounded-full bg-white hover:bg-emerald-50 text-[#15803D] text-[11px] font-bold shrink-0 cursor-pointer"
+                            >
+                              {liveCall.type === 'video' ? (
+                                <Video className="w-3 h-3" />
+                              ) : (
+                                <Phone className="w-3 h-3" />
+                              )}
+                              <span>{isInLiveCall ? 'In Call' : 'Join Call'}</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   );
                 })
               )}
@@ -667,7 +744,13 @@ export function MessagesPage({
                 currentUser={currentUser}
                 allUsers={allUsers}
                 allGroups={groups}
+                ongoingCall={ongoingCallByGroupId.get(selectedGroup.id) || null}
+                isInThisCall={Boolean(
+                  activeGroupCallId &&
+                    ongoingCallByGroupId.get(selectedGroup.id)?.id === activeGroupCallId,
+                )}
                 onStartGroupCall={onStartGroupCall}
+                onJoinGroupCall={onJoinGroupCall}
                 onGroupLeftOrDeleted={() => onSelectGroup(null)}
               />
             ) : (

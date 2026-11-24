@@ -26,14 +26,17 @@ import {
   createGroupPermanent,
   deleteGroupMessagePermanent,
   deleteGroupPermanent,
+  formatCallParticipantsSummary,
+  GROUP_FULL_ERROR_MSG,
   leaveGroupPermanent,
+  MAX_GROUP_MEMBERS,
   removeGroupMemberPermanent,
   sendGroupMessagePermanent,
   subscribeGroupMessagesPermanent,
   toggleGroupAdminPermanent,
   updateGroupDetailsPermanent,
 } from '../lib/groupService';
-import type {CallType, ChatGroupDoc, GroupChatMessage, UserProfile} from '../types';
+import type {CallType, ChatGroupDoc, GroupCallDoc, GroupChatMessage, UserProfile} from '../types';
 import {ChatInputBar, type OutgoingChatPayload} from './ChatInputBar';
 import {ChatMessageBubble, type UnifiedBubbleMessage} from './ChatMessageBubble';
 import {ForwardMediaModal} from './ForwardMediaModal';
@@ -68,10 +71,22 @@ export function CreateGroupModal({
     return list.filter((u) => u.name.toLowerCase().includes(q));
   }, [candidates, currentUser.uid, search]);
 
+  const maxSelectableOthers = MAX_GROUP_MEMBERS - 1;
+  const isCreateGroupFull = selectedUids.length >= maxSelectableOthers;
+
   function toggleMember(uid: string) {
-    setSelectedUids((prev) =>
-      prev.includes(uid) ? prev.filter((id) => id !== uid) : [...prev, uid].slice(0, 49),
-    );
+    setSelectedUids((prev) => {
+      if (prev.includes(uid)) {
+        setError(null);
+        return prev.filter((id) => id !== uid);
+      }
+      if (prev.length >= maxSelectableOthers) {
+        setError(GROUP_FULL_ERROR_MSG);
+        return prev;
+      }
+      setError(null);
+      return [...prev, uid];
+    });
   }
 
   async function handlePhotoPick(e: ChangeEvent<HTMLInputElement>) {
@@ -190,18 +205,26 @@ export function CreateGroupModal({
           <div className="space-y-2.5">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-[#334155] dark:text-[#CBD5E1]">
-                Select Members ({selectedUids.length} selected)
+                Select Members ({selectedUids.length + 1} / {MAX_GROUP_MEMBERS})
               </span>
               {selectedUids.length > 0 && (
                 <button
                   type="button"
-                  onClick={() => setSelectedUids([])}
+                  onClick={() => {
+                    setSelectedUids([]);
+                    setError(null);
+                  }}
                   className="text-[11px] font-semibold text-[#1877F2] hover:underline cursor-pointer"
                 >
                   Clear
                 </button>
               )}
             </div>
+            {isCreateGroupFull && (
+              <div className="rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 px-3 py-1.5 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
+                {GROUP_FULL_ERROR_MSG}
+              </div>
+            )}
 
             <div className="relative">
               <Search className="w-4 h-4 text-[#64748B] absolute left-3 top-1/2 -translate-y-1/2" />
@@ -284,7 +307,10 @@ interface GroupChatWindowProps {
   currentUser: UserProfile;
   allUsers: UserProfile[];
   allGroups?: ChatGroupDoc[];
+  ongoingCall?: GroupCallDoc | null;
+  isInThisCall?: boolean;
   onStartGroupCall: (group: ChatGroupDoc, type: CallType) => void;
+  onJoinGroupCall: (call: GroupCallDoc) => void;
   onGroupLeftOrDeleted: (groupId: string) => void;
 }
 
@@ -293,7 +319,10 @@ export function GroupChatWindow({
   currentUser,
   allUsers,
   allGroups = [],
+  ongoingCall = null,
+  isInThisCall = false,
   onStartGroupCall,
+  onJoinGroupCall,
   onGroupLeftOrDeleted,
 }: GroupChatWindowProps) {
   const [messages, setMessages] = useState<GroupChatMessage[]>([]);
@@ -392,7 +421,13 @@ export function GroupChatWindow({
     }
   }
 
+  const isGroupFull = group.memberUids.length >= MAX_GROUP_MEMBERS;
+
   async function handleAddSingleMember(member: UserProfile) {
+    if (group.memberUids.length >= MAX_GROUP_MEMBERS) {
+      setInfoError(GROUP_FULL_ERROR_MSG);
+      return;
+    }
     setBusyAction(true);
     setInfoError(null);
     try {
@@ -445,6 +480,15 @@ export function GroupChatWindow({
     }
   }
 
+  const liveCallActiveUids =
+    ongoingCall && ongoingCall.status !== 'ended' && ongoingCall.activeUids.length > 0
+      ? ongoingCall.activeUids
+      : [];
+  const hasLiveCall = Boolean(ongoingCall && liveCallActiveUids.length > 0);
+  const liveCallSummary = hasLiveCall
+    ? formatCallParticipantsSummary(liveCallActiveUids, userByUid, ongoingCall?.hostName)
+    : '';
+
   return (
     <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] h-[620px] rounded-2xl shadow-[0_1px_2px_rgba(15,23,42,0.04)] flex flex-col overflow-hidden relative">
       {/* Group Header with Phone + Video + Info */}
@@ -454,13 +498,19 @@ export function GroupChatWindow({
           onClick={() => setShowInfo((prev) => !prev)}
           className="flex items-center gap-2.5 min-w-0 text-left cursor-pointer"
         >
-          <Avatar src={group.photoUrl} name={group.name} size="sm" />
+          <div className="relative">
+            <Avatar src={group.photoUrl} name={group.name} size="sm" />
+            {hasLiveCall && (
+              <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-[#22C55E] ring-2 ring-white dark:ring-[#16191F] animate-pulse" />
+            )}
+          </div>
           <div className="min-w-0">
             <span className="font-display font-semibold text-sm text-[#0F172A] dark:text-white truncate block">
               {group.name}
             </span>
             <span className="text-[11px] text-[#64748B] dark:text-[#94A3B8] tabular-nums block">
-              {group.memberUids.length} {group.memberUids.length === 1 ? 'member' : 'members'}
+              {group.memberUids.length} / {MAX_GROUP_MEMBERS} members
+              {hasLiveCall ? ` · ${liveCallActiveUids.length} jon call e` : ''}
             </span>
           </div>
         </button>
@@ -468,19 +518,35 @@ export function GroupChatWindow({
         <div className="flex items-center gap-1 shrink-0">
           <button
             type="button"
-            onClick={() => onStartGroupCall(group, 'audio')}
-            title="Start Group Audio Call"
+            onClick={() =>
+              hasLiveCall && ongoingCall
+                ? onJoinGroupCall(ongoingCall)
+                : onStartGroupCall(group, 'audio')
+            }
+            title={hasLiveCall ? 'Join ongoing Group Call' : 'Start Group Audio Call'}
             aria-label="Start group audio call"
-            className="w-9 h-9 rounded-full text-[#1877F2] dark:text-[#60A5FA] hover:bg-[#1877F2]/10 flex items-center justify-center transition-colors cursor-pointer"
+            className={`w-9 h-9 rounded-full flex items-center justify-center transition-colors cursor-pointer ${
+              hasLiveCall
+                ? 'bg-[#16A34A]/15 text-[#16A34A] dark:text-[#4ADE80] hover:bg-[#16A34A]/25'
+                : 'text-[#1877F2] dark:text-[#60A5FA] hover:bg-[#1877F2]/10'
+            }`}
           >
             <Phone className="w-[18px] h-[18px]" />
           </button>
           <button
             type="button"
-            onClick={() => onStartGroupCall(group, 'video')}
-            title="Start Group Video Call"
+            onClick={() =>
+              hasLiveCall && ongoingCall
+                ? onJoinGroupCall(ongoingCall)
+                : onStartGroupCall(group, 'video')
+            }
+            title={hasLiveCall ? 'Join ongoing Group Call' : 'Start Group Video Call'}
             aria-label="Start group video call"
-            className="w-9 h-9 rounded-full text-[#1877F2] dark:text-[#60A5FA] hover:bg-[#1877F2]/10 flex items-center justify-center transition-colors cursor-pointer"
+            className={`w-9 h-9 rounded-full flex items-center justify-center transition-colors cursor-pointer ${
+              hasLiveCall
+                ? 'bg-[#16A34A]/15 text-[#16A34A] dark:text-[#4ADE80] hover:bg-[#16A34A]/25'
+                : 'text-[#1877F2] dark:text-[#60A5FA] hover:bg-[#1877F2]/10'
+            }`}
           >
             <Video className="w-[19px] h-[19px]" />
           </button>
@@ -499,6 +565,72 @@ export function GroupChatWindow({
           </button>
         </div>
       </div>
+
+      {/* Facebook-style Live Group Call Green Banner + Active Callers Avatars Strip */}
+      {hasLiveCall && ongoingCall && (
+        <div className="px-3.5 py-2.5 bg-gradient-to-r from-[#15803D] via-[#16A34A] to-[#15803D] text-white border-b border-emerald-700/40 shrink-0 space-y-2 shadow-sm">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5 text-xs sm:text-[13px] font-bold leading-snug">
+                <span className="relative flex h-2.5 w-2.5 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-85" />
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500 ring-1 ring-white/80" />
+                </span>
+                <span className="truncate">
+                  Group Call Choltese - {liveCallActiveUids.length} jon ache
+                </span>
+              </div>
+              <p className="text-[11px] sm:text-xs text-emerald-50/95 truncate mt-0.5">
+                {liveCallSummary}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => onJoinGroupCall(ongoingCall)}
+              className="inline-flex items-center gap-1.5 px-3.5 h-8 rounded-full bg-white hover:bg-emerald-50 text-[#15803D] text-xs font-bold shadow-sm active:scale-95 transition-all shrink-0 cursor-pointer"
+            >
+              {ongoingCall.type === 'video' ? (
+                <Video className="w-3.5 h-3.5" />
+              ) : (
+                <Phone className="w-3.5 h-3.5" />
+              )}
+              <span>{isInThisCall ? 'Return to Call' : 'Join Call'}</span>
+            </button>
+          </div>
+
+          {/* Active Callers Circular Profile Photos + "X jon call e" */}
+          <div className="flex items-center gap-2 pt-0.5">
+            <div className="flex items-center -space-x-2">
+              {liveCallActiveUids.slice(0, 6).map((uid) => {
+                const prof = userByUid.get(uid);
+                return (
+                  <div
+                    key={uid}
+                    title={prof?.name || 'Member'}
+                    className="rounded-full ring-2 ring-[#16A34A] bg-emerald-900"
+                  >
+                    <Avatar
+                      src={prof?.avatar_url || ''}
+                      name={prof?.name || 'Member'}
+                      size="xs"
+                      className="w-6 h-6"
+                    />
+                  </div>
+                );
+              })}
+              {liveCallActiveUids.length > 6 && (
+                <span className="w-6 h-6 rounded-full bg-emerald-900/90 ring-2 ring-[#16A34A] text-[10px] font-bold text-white flex items-center justify-center">
+                  +{liveCallActiveUids.length - 6}
+                </span>
+              )}
+            </div>
+            <span className="text-[11px] font-semibold text-emerald-50 tabular-nums">
+              {liveCallActiveUids.length} jon call e
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Group Messages Stream OR Group Info Settings Drawer */}
       {showInfo ? (
@@ -568,7 +700,8 @@ export function GroupChatWindow({
                   {group.name}
                 </h3>
                 <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
-                  {group.memberUids.length} members · {group.adminUids.length} admin
+                  {group.memberUids.length} / {MAX_GROUP_MEMBERS} members · {group.adminUids.length}{' '}
+                  admin
                   {group.adminUids.length === 1 ? '' : 's'}
                 </p>
                 {isAdmin && (
@@ -586,26 +719,45 @@ export function GroupChatWindow({
 
           {/* Members List & Admin Actions */}
           <div className="bg-white dark:bg-[#16191F] border border-[#E5E8EE] dark:border-[#252A34] rounded-2xl overflow-hidden">
-            <div className="px-4 py-3 border-b border-[#E5E8EE] dark:border-[#252A34] flex items-center justify-between">
+            <div className="px-4 py-3 border-b border-[#E5E8EE] dark:border-[#252A34] flex items-center justify-between gap-2">
               <span className="text-xs font-bold uppercase tracking-wide text-[#64748B] dark:text-[#94A3B8]">
-                Members ({group.memberUids.length})
+                Members ({group.memberUids.length} / {MAX_GROUP_MEMBERS})
               </span>
               {isAdmin && (
                 <button
                   type="button"
-                  onClick={() => setShowAddMembers((prev) => !prev)}
-                  className="inline-flex items-center gap-1 text-xs font-semibold text-[#1877F2] dark:text-[#60A5FA] hover:underline cursor-pointer"
+                  onClick={() => {
+                    if (isGroupFull) {
+                      setInfoError(GROUP_FULL_ERROR_MSG);
+                      setShowAddMembers(false);
+                      return;
+                    }
+                    setShowAddMembers((prev) => !prev);
+                  }}
+                  className={`inline-flex items-center gap-1 text-xs font-semibold cursor-pointer ${
+                    isGroupFull
+                      ? 'text-amber-600 dark:text-amber-400'
+                      : 'text-[#1877F2] dark:text-[#60A5FA] hover:underline'
+                  }`}
                 >
                   <UserPlus className="w-3.5 h-3.5" />
-                  <span>{showAddMembers ? 'Done' : 'Add Member'}</span>
+                  <span>{isGroupFull ? 'Group Full (40)' : showAddMembers ? 'Done' : 'Add Member'}</span>
                 </button>
               )}
             </div>
 
-            {showAddMembers && isAdmin && (
+            {isGroupFull && (
+              <div className="px-4 py-2.5 bg-amber-50 dark:bg-amber-950/35 border-b border-amber-200 dark:border-amber-800/60 text-xs font-semibold text-amber-800 dark:text-amber-300 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{GROUP_FULL_ERROR_MSG}</span>
+              </div>
+            )}
+
+            {showAddMembers && isAdmin && !isGroupFull && (
               <div className="p-3 bg-[#F8FAFC] dark:bg-[#101318] border-b border-[#E5E8EE] dark:border-[#252A34] space-y-2">
                 <p className="text-[11px] font-semibold text-[#64748B] dark:text-[#94A3B8]">
-                  Tap a friend to add to this group:
+                  Tap a friend to add to this group ({MAX_GROUP_MEMBERS - group.memberUids.length}{' '}
+                  spots left):
                 </p>
                 {nonMembers.length === 0 ? (
                   <p className="text-xs text-[#64748B]">All users are already in this group.</p>
@@ -624,9 +776,9 @@ export function GroupChatWindow({
                         </div>
                         <button
                           type="button"
-                          disabled={busyAction}
+                          disabled={busyAction || isGroupFull}
                           onClick={() => handleAddSingleMember(u)}
-                          className="px-2.5 py-1 rounded-lg bg-[#1877F2] text-white text-[11px] font-semibold cursor-pointer"
+                          className="px-2.5 py-1 rounded-lg bg-[#1877F2] text-white text-[11px] font-semibold disabled:opacity-50 cursor-pointer"
                         >
                           Add
                         </button>

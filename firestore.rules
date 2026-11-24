@@ -639,11 +639,11 @@ service cloud.firestore {
         && isValidId(data.creatorUid)
         && data.memberUids is list
         && data.memberUids.size() >= 1
-        && data.memberUids.size() <= 50
+        && data.memberUids.size() <= 40
         && data.memberUids[0] is string
         && data.adminUids is list
         && data.adminUids.size() >= 1
-        && data.adminUids.size() <= 20
+        && data.adminUids.size() <= 40
         && data.adminUids[0] is string
         && data.creatorUid in data.memberUids
         && data.creatorUid in data.adminUids
@@ -740,7 +740,7 @@ service cloud.firestore {
         && data.callDurationSec <= 86400
         && data.callJoinedCount is number
         && data.callJoinedCount >= 0
-        && data.callJoinedCount <= 50
+        && data.callJoinedCount <= 40
         && (data.content.size() > 0 || data.mediaUrl.size() > 0 || data.messageType == 'location')
         && data.createdAt is timestamp;
     }
@@ -773,6 +773,7 @@ service cloud.firestore {
           'status',
           'memberUids',
           'activeUids',
+          'participants',
           'joinedUids',
           'durationSec',
           'startedAt',
@@ -796,17 +797,22 @@ service cloud.firestore {
         && data.type is string
         && data.type in ['audio', 'video']
         && data.status is string
-        && data.status in ['ringing', 'active', 'ended']
+        && data.status in ['ringing', 'active', 'ongoing', 'ended']
         && data.memberUids is list
         && data.memberUids.size() >= 1
-        && data.memberUids.size() <= 50
+        && data.memberUids.size() <= 40
         && data.memberUids[0] is string
         && data.activeUids is list
-        && data.activeUids.size() <= 16
+        && data.activeUids.size() <= 40
         && (data.activeUids.size() == 0 || data.activeUids[0] is string)
+        && (!('participants' in data) || (
+          data.participants is list
+          && data.participants.size() <= 40
+          && (data.participants.size() == 0 || data.participants[0] is string)
+        ))
         && data.joinedUids is list
         && data.joinedUids.size() >= 1
-        && data.joinedUids.size() <= 50
+        && data.joinedUids.size() <= 40
         && data.joinedUids[0] is string
         && data.durationSec is number
         && data.durationSec >= 0
@@ -1763,8 +1769,9 @@ service cloud.firestore {
         && isValidId(callId)
         && isValidGroupCall(incoming(), callId)
         && incoming().hostUid == request.auth.uid
-        && incoming().status == 'ringing'
+        && incoming().status in ['ringing', 'ongoing']
         && request.auth.uid in incoming().activeUids
+        && (!('participants' in incoming()) || request.auth.uid in incoming().participants)
         && request.auth.uid in incoming().joinedUids
         && incoming().durationSec == 0
         && incoming().startedAt == request.time
@@ -1774,7 +1781,7 @@ service cloud.firestore {
       allow update: if isVerifiedUser()
         && isValidId(callId)
         && isValidGroupCall(incoming(), callId)
-        && existing().status in ['ringing', 'active']
+        && existing().status in ['ringing', 'active', 'ongoing']
         && request.auth.uid in existing().memberUids
         && incoming().id == existing().id
         && incoming().groupId == existing().groupId
@@ -1786,6 +1793,7 @@ service cloud.firestore {
         && incoming().diff(existing()).affectedKeys().hasOnly([
           'status',
           'activeUids',
+          'participants',
           'joinedUids',
           'durationSec',
           'updatedAt'
@@ -1809,7 +1817,7 @@ service cloud.firestore {
           && isValidGroupCallParticipant(incoming(), callId, userId)
           && incoming().joinedAt == request.time
           && incoming().updatedAt == request.time
-          && get(/databases/$(database)/documents/groupCalls/$(callId)).data.status in ['ringing', 'active']
+          && get(/databases/$(database)/documents/groupCalls/$(callId)).data.status in ['ringing', 'active', 'ongoing']
           && request.auth.uid in get(/databases/$(database)/documents/groupCalls/$(callId)).data.memberUids;
 
         allow update: if isVerifiedUser()
@@ -1847,7 +1855,7 @@ service cloud.firestore {
           && isValidId(signalId)
           && isValidGroupCallSignal(incoming(), callId, signalId)
           && incoming().createdAt == request.time
-          && get(/databases/$(database)/documents/groupCalls/$(callId)).data.status in ['ringing', 'active']
+          && get(/databases/$(database)/documents/groupCalls/$(callId)).data.status in ['ringing', 'active', 'ongoing']
           && request.auth.uid in get(/databases/$(database)/documents/groupCalls/$(callId)).data.memberUids;
 
         allow update, delete: if false;

@@ -955,8 +955,26 @@ export default function App() {
     setOutgoingCallTarget({peer, type});
   }
 
+  function handleJoinGroupCall(call: GroupCallDoc) {
+    setDeclinedGroupCallIds((prev) => {
+      if (!prev.has(call.id)) return prev;
+      const next = new Set(prev);
+      next.delete(call.id);
+      return next;
+    });
+    setActiveGroupCall(call);
+  }
+
   async function handleStartGroupCall(group: ChatGroupDoc, type: CallType) {
     if (!currentUser?.uid) return;
+    // If a call is already ongoing in this group, join it directly instead of creating a duplicate
+    const existingOngoing = activeGroupCallsList.find(
+      (c) => c.groupId === group.id && c.status !== 'ended' && c.activeUids.length > 0,
+    );
+    if (existingOngoing) {
+      handleJoinGroupCall(existingOngoing);
+      return;
+    }
     try {
       const created = await startGroupCallPermanent(group, currentUser, type);
       setActiveGroupCall(created);
@@ -1663,6 +1681,8 @@ export default function App() {
                 friends={filteredNetwork.friends}
                 conversations={filteredConversations}
                 groups={groups}
+                activeGroupCalls={activeGroupCallsList}
+                activeGroupCallId={activeGroupCall?.id || null}
                 activePeer={activeChatPeer}
                 activeGroupId={activeGroupId}
                 messagesByPeer={messagesByPeer}
@@ -1680,6 +1700,7 @@ export default function App() {
                 onOpenProfile={(uid) => navigateApp('profile', uid)}
                 onStartCall={handleStartCall}
                 onStartGroupCall={handleStartGroupCall}
+                onJoinGroupCall={handleJoinGroupCall}
               />
             )}
 

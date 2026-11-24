@@ -22,6 +22,34 @@ import type {
 import {db, handleFirestoreError, OperationType} from './firebase';
 import {deleteFirebaseStorageUrlIfApplicable} from './mediaUpload';
 
+export const MAX_GROUP_MEMBERS = 40;
+export const MAX_GROUP_CALL_PARTICIPANTS = 40;
+export const GROUP_FULL_ERROR_MSG = 'Group is full - Max 40 members';
+
+export function formatCallParticipantsSummary(
+  activeUids: string[],
+  userByUid: Map<string, UserProfile>,
+  fallbackHostName?: string,
+): string {
+  const uniqueUids = Array.from(new Set(activeUids.filter(Boolean)));
+  if (uniqueUids.length === 0) {
+    return fallbackHostName ? `${fallbackHostName} call e ache` : 'Group Call choltese';
+  }
+  const names = uniqueUids.map((uid) => {
+    const prof = userByUid.get(uid);
+    const full = prof?.name?.trim();
+    if (!full) return 'Member';
+    return full.split(/\s+/)[0] || full;
+  });
+  if (names.length === 1) {
+    return `${names[0]} call e ache`;
+  }
+  if (names.length === 2) {
+    return `${names[0]}, ${names[1]} call e ache`;
+  }
+  return `${names[0]}, ${names[1]} + ${names.length - 2} jon call e ache`;
+}
+
 function makeId(prefix: string): string {
   const rand =
     typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -64,6 +92,21 @@ function mapGroupDoc(id: string, data: Record<string, unknown>): ChatGroupDoc {
 }
 
 function mapGroupCallDoc(id: string, data: Record<string, unknown>): GroupCallDoc {
+  const rawActive = Array.isArray(data.activeUids) ? data.activeUids.map(String) : [];
+  const rawParticipants = Array.isArray(data.participants)
+    ? data.participants.map(String)
+    : rawActive;
+  const syncedActive = rawActive.length > 0 ? rawActive : rawParticipants;
+  const rawStatus = String(data.status || 'ongoing');
+  const status: GroupCallDoc['status'] =
+    rawStatus === 'ended'
+      ? 'ended'
+      : rawStatus === 'ongoing'
+        ? 'ongoing'
+        : rawStatus === 'active'
+          ? 'active'
+          : 'ringing';
+
   return {
     id,
     groupId: String(data.groupId || ''),
@@ -72,12 +115,10 @@ function mapGroupCallDoc(id: string, data: Record<string, unknown>): GroupCallDo
     hostUid: String(data.hostUid || ''),
     hostName: String(data.hostName || 'Member'),
     type: (data.type === 'video' ? 'video' : 'audio') as CallType,
-    status: (data.status === 'active' || data.status === 'ended' ? data.status : 'ringing') as
-      | 'ringing'
-      | 'active'
-      | 'ended',
+    status,
     memberUids: Array.isArray(data.memberUids) ? data.memberUids.map(String) : [],
-    activeUids: Array.isArray(data.activeUids) ? data.activeUids.map(String) : [],
+    activeUids: syncedActive,
+    participants: rawParticipants,
     joinedUids: Array.isArray(data.joinedUids) ? data.joinedUids.map(String) : [],
     durationSec: typeof data.durationSec === 'number' ? data.durationSec : 0,
     startedAt: tsToIso(data.startedAt),
@@ -120,7 +161,10 @@ export async function createGroupPermanent(params: {
 
   const uniqueMembers = Array.from(
     new Set([params.creator.uid, ...params.memberUids.filter(Boolean)]),
-  ).slice(0, 50);
+  );
+  if (uniqueMembers.length > MAX_GROUP_MEMBERS) {
+    throw new Error(GROUP_FULL_ERROR_MSG);
+  }
 
   const groupId = makeId('grp');
   const creatorName = clamp(params.creator.name, 60) || 'Member';
@@ -290,7 +334,10 @@ export async function sendGroupMessagePermanent(params: {
   const locationLabel = clamp(params.locationLabel, 200);
   const callType = params.callType || '';
   const callDurationSec = Math.max(0, Math.min(86400, Math.round(params.callDurationSec || 0)));
-  const callJoinedCount = Math.max(0, Math.min(50, Math.round(params.callJoinedCount || 0)));
+  const callJoinedCount = Math.max(
+    0,
+    Math.min(MAX_GROUP_CALL_PARTICIPANTS, Math.round(params.callJoinedCount || 0)),
+  );
 
   try {
     await setDoc(doc(db, 'groups', params.groupId, 'messages', msgId), {
@@ -399,12 +446,22 @@ export async function addGroupMembersPermanent(
   actor: UserProfile,
   newMembers: UserProfile[],
 ): Promise<void> {
+  if (group.memberUids.length >= MAX_GROUP_MEMBERS) {
+    throw new Error(GROUP_FULL_ERROR_MSG);
+  }
   const addUids = newMembers
     .map((m) => m.uid)
     .filter((u): u is string => Boolean(u && !group.memberUids.includes(u)));
   if (addUids.length === 0) return;
 
-  const updatedMembers = Array.from(new Set([...group.memberUids, ...addUids])).slice(0, 50);
+  if (group.memberUids.length + addUids.length > MAX_GROUP_MEMBERS) {
+    throw new Error(GROUP_FULL_ERROR_MSG);
+  }
+
+  const updatedMembers = Array.from(new Set([...group.memberUids, ...addUids])).slice(
+    0,
+    MAX_GROUP_MEMBERS,
+  );
   const names = newMembers
     .filter((m) => m.uid && addUids.includes(m.uid))
     .map((m) => m.name)
@@ -477,7 +534,7 @@ export async function toggleGroupAdminPermanent(
   const isCurrentlyAdmin = group.adminUids.includes(targetUid);
   const updatedAdmins = isCurrentlyAdmin
     ? group.adminUids.filter((u) => u !== targetUid)
-    : Array.from(new Set([...group.adminUids, targetUid])).slice(0, 20);
+    : Array.from(new Set([...group.adminUids, targetUid])).slice(0, MAX_GROUP_MEMBERS);
   const note = isCurrentlyAdmin
     ? `${actor.name} removed ${targetName} as admin`
     : `${actor.name} made ${targetName} an admin`;
@@ -667,6 +724,7 @@ export async function startGroupCallPermanent(
   if (!host.uid) throw new Error('Not authenticated.');
   const callId = makeId('gcall');
   const hostName = clamp(host.name, 60) || 'Member';
+  const safeMembers = group.memberUids.slice(0, MAX_GROUP_MEMBERS);
   try {
     await setDoc(doc(db, 'groupCalls', callId), {
       id: callId,
@@ -676,9 +734,10 @@ export async function startGroupCallPermanent(
       hostUid: host.uid,
       hostName,
       type,
-      status: 'ringing',
-      memberUids: group.memberUids.slice(0, 50),
+      status: 'ongoing',
+      memberUids: safeMembers,
       activeUids: [host.uid],
+      participants: [host.uid],
       joinedUids: [host.uid],
       durationSec: 0,
       startedAt: serverTimestamp(),
@@ -695,6 +754,14 @@ export async function startGroupCallPermanent(
     isVideoOff: type === 'audio',
   });
 
+  // Notify everyone in the Group Chat in real time
+  await sendGroupMessagePermanent({
+    groupId: group.id,
+    sender: host,
+    content: `${hostName} Group Call e join korse`,
+    messageType: 'system',
+  }).catch(() => {});
+
   const now = new Date().toISOString();
   return {
     id: callId,
@@ -704,9 +771,10 @@ export async function startGroupCallPermanent(
     hostUid: host.uid,
     hostName,
     type,
-    status: 'ringing',
-    memberUids: group.memberUids,
+    status: 'ongoing',
+    memberUids: safeMembers,
     activeUids: [host.uid],
+    participants: [host.uid],
     joinedUids: [host.uid],
     durationSec: 0,
     startedAt: now,
@@ -727,12 +795,24 @@ export async function joinGroupCallPermanent(
     const current = mapGroupCallDoc(snap.id, snap.data() as Record<string, unknown>);
     if (current.status === 'ended') return current;
 
-    const activeUids = Array.from(new Set([...current.activeUids, user.uid])).slice(0, 16);
-    const joinedUids = Array.from(new Set([...current.joinedUids, user.uid])).slice(0, 50);
+    const alreadyInCall = current.activeUids.includes(user.uid);
+    if (!alreadyInCall && current.activeUids.length >= MAX_GROUP_CALL_PARTICIPANTS) {
+      throw new Error('Group call is full (Max 40 participants).');
+    }
+
+    const activeUids = Array.from(new Set([...current.activeUids, user.uid])).slice(
+      0,
+      MAX_GROUP_CALL_PARTICIPANTS,
+    );
+    const joinedUids = Array.from(new Set([...current.joinedUids, user.uid])).slice(
+      0,
+      MAX_GROUP_CALL_PARTICIPANTS,
+    );
 
     await updateDoc(ref, {
-      status: activeUids.length >= 2 ? 'active' : current.status,
+      status: 'ongoing',
       activeUids,
+      participants: activeUids,
       joinedUids,
       updatedAt: serverTimestamp(),
     });
@@ -743,10 +823,22 @@ export async function joinGroupCallPermanent(
       isVideoOff,
     });
 
+    // Post real-time system message in Group Chat when a member newly joins the call
+    if (!alreadyInCall) {
+      const joinerName = clamp(user.name, 60) || 'Member';
+      await sendGroupMessagePermanent({
+        groupId: current.groupId,
+        sender: user,
+        content: `${joinerName} Group Call e join korse`,
+        messageType: 'system',
+      }).catch(() => {});
+    }
+
     return {
       ...current,
-      status: activeUids.length >= 2 ? 'active' : current.status,
+      status: 'ongoing',
       activeUids,
+      participants: activeUids,
       joinedUids,
     };
   } catch (error) {
@@ -782,11 +874,20 @@ export async function leaveGroupCallPermanent(
     const finalDur = Math.max(current.durationSec, Math.round(elapsedSec));
 
     await updateDoc(ref, {
-      status: shouldEnd ? 'ended' : current.status,
+      status: shouldEnd ? 'ended' : 'ongoing',
       activeUids: nextActive,
+      participants: nextActive,
       durationSec: finalDur,
       updatedAt: serverTimestamp(),
     });
+
+    const leaverName = clamp(user.name, 60) || 'Member';
+    await sendGroupMessagePermanent({
+      groupId: current.groupId,
+      sender: user,
+      content: `${leaverName} call theke chole gese`,
+      messageType: 'system',
+    }).catch(() => {});
 
     if (shouldEnd) {
       const logContent = formatGroupCallLogMessage(
@@ -809,8 +910,9 @@ export async function leaveGroupCallPermanent(
       ended: shouldEnd,
       callDoc: {
         ...current,
-        status: shouldEnd ? 'ended' : current.status,
+        status: shouldEnd ? 'ended' : 'ongoing',
         activeUids: nextActive,
+        participants: nextActive,
         durationSec: finalDur,
       },
     };

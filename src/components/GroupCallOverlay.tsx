@@ -21,6 +21,7 @@ import {
 import {
   joinGroupCallPermanent,
   leaveGroupCallPermanent,
+  MAX_GROUP_CALL_PARTICIPANTS,
   sendGroupCallSignal,
   subscribeGroupCallDoc,
   subscribeGroupCallParticipants,
@@ -405,7 +406,7 @@ export function GroupCallOverlay({
         ...fromCallDoc,
       ]),
     );
-    return merged.slice(0, 12);
+    return merged.slice(0, MAX_GROUP_CALL_PARTICIPANTS);
   }, [participantDocs, liveCall.activeUids, mode, myUid]);
 
   // Build ordered tile list for the Grid (ALL hooks stay unconditionally above any early return!)
@@ -613,7 +614,10 @@ export function GroupCallOverlay({
     ringtoneRef.current = ringtone;
     if (mode === 'incoming') {
       ringtone.start('incoming');
-    } else if (liveCall.status === 'ringing' && activeJoinedUids.length <= 1) {
+    } else if (
+      (liveCall.status === 'ringing' || liveCall.status === 'ongoing') &&
+      activeJoinedUids.length <= 1
+    ) {
       ringtone.start('outgoing');
     }
     return () => {
@@ -902,8 +906,7 @@ export function GroupCallOverlay({
   }
 
   // ============================================
-  // ACTIVE GROUP CALL — RESPONSIVE MESSENGER GRID
-  // 1 = full, 2 = 2 tiles, 3-4 = 2x2, 5-6 = 2x3/3x2, 7+ = 3-col grid
+  // ACTIVE GROUP CALL — RESPONSIVE MESSENGER GRID (UP TO 40 MEMBERS)
   // ============================================
   const count = participants.length;
   const gridClass =
@@ -915,7 +918,9 @@ export function GroupCallOverlay({
           ? 'grid-cols-2 grid-rows-2'
           : count <= 6
             ? 'grid-cols-2 sm:grid-cols-3 grid-rows-3 sm:grid-rows-2'
-            : 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 auto-rows-fr';
+            : count <= 12
+              ? 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 auto-rows-[minmax(150px,1fr)]'
+              : 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 auto-rows-[minmax(130px,1fr)]';
 
   return (
     <div className="fixed inset-0 z-[140] bg-[#0B0F17] text-white flex flex-col select-none">
@@ -927,11 +932,14 @@ export function GroupCallOverlay({
             <h2 className="font-display font-bold text-sm sm:text-base truncate">
               {liveCall.groupName}
             </h2>
-            <p className="text-xs text-white/70 tabular-nums flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse inline-block" />
+            <p className="text-xs text-white/75 tabular-nums flex items-center gap-1.5 flex-wrap">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse inline-block shrink-0" />
+              <span className="font-semibold text-emerald-300">
+                In Call: {count} / {MAX_GROUP_CALL_PARTICIPANTS}
+              </span>
+              <span className="text-white/40">·</span>
               <span>
-                {count <= 1 ? 'Waiting for others...' : formatCallDuration(elapsedSec)} · {count}{' '}
-                {count === 1 ? 'participant' : 'participants'}
+                {count <= 1 ? 'Waiting for others...' : formatCallDuration(elapsedSec)}
               </span>
             </p>
           </div>
@@ -949,7 +957,10 @@ export function GroupCallOverlay({
               <RefreshCw className={`w-4 h-4 ${switchingCamera ? 'animate-spin' : ''}`} />
             </button>
           )}
-          <span className="px-2.5 py-1 rounded-full bg-white/10 border border-white/10 text-[11px] font-semibold text-white/90">
+          <span className="px-2.5 py-1 rounded-full bg-emerald-500/20 border border-emerald-400/30 text-[11px] font-bold text-emerald-200 tabular-nums">
+            In Call: {count} / {MAX_GROUP_CALL_PARTICIPANTS}
+          </span>
+          <span className="hidden sm:inline-flex px-2.5 py-1 rounded-full bg-white/10 border border-white/10 text-[11px] font-semibold text-white/90">
             {isVideo ? 'Group Video' : 'Group Audio'}
           </span>
         </div>

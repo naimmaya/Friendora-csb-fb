@@ -197,9 +197,10 @@ export interface GroupCallDoc {
   hostUid: string;
   hostName: string;
   type: CallType;
-  status: 'ringing' | 'active' | 'ended';
+  status: 'ringing' | 'active' | 'ongoing' | 'ended';
   memberUids: string[];
   activeUids: string[];
+  participants?: string[];
   joinedUids: string[];
   durationSec: number;
   startedAt: string;
