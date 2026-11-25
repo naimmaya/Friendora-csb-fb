@@ -74,6 +74,7 @@ export interface PostItem {
   video_url?: string | null;
   media_type?: 'text' | 'image' | 'video';
   video_thumbnail?: string | null;
+  duration?: number;
   comments_disabled?: boolean;
   edited?: boolean;
   page_id?: string | null;
@@ -411,3 +412,55 @@ export type AppView =
   | 'reels'
   | 'activity';
 export type AuthView = 'login' | 'register' | 'forgot-password' | 'reset-password';
+
+export type StoryMediaType = 'image' | 'video' | 'text';
+export type StoryReactionType = 'like' | 'love' | 'haha' | 'wow' | 'sad' | 'angry';
+
+export interface StoryItem {
+  id: string;
+  userId: string;
+  userName: string;
+  userPhoto: string;
+  mediaType: StoryMediaType;
+  storyImage: string;
+  storyVideo: string;
+  textContent: string;
+  bgGradient: string;
+  caption: string;
+  durationSec: number;
+  createdAt: string;
+  expiresAt: string;
+  createdAtMs: number;
+  expiresAtMs: number;
+}
+
+export interface StoryViewerItem {
+  storyId: string;
+  storyOwnerId: string;
+  viewerId: string;
+  viewerName: string;
+  viewerPhoto: string;
+  viewedAt: string;
+  viewedAtMs: number;
+}
+
+export interface StoryReactionItem {
+  storyId: string;
+  storyOwnerId: string;
+  userId: string;
+  userName: string;
+  userPhoto: string;
+  reaction: StoryReactionType;
+  reactedAt: string;
+  updatedAt: string;
+  updatedAtMs: number;
+}
+
+export interface UserStoryGroup {
+  userId: string;
+  userName: string;
+  userPhoto: string;
+  stories: StoryItem[];
+  hasUnseen: boolean;
+  latestCreatedAtMs: number;
+}

@@ -318,7 +318,9 @@ export function ChatMessageBubble({
 
   if (message.messageType === 'call') {
     const isMissedOrDeclined =
-      message.callStatus === 'missed' || message.callStatus === 'declined';
+      message.callStatus === 'missed' ||
+      message.callStatus === 'declined' ||
+      message.content.toLowerCase().startsWith('missed');
     const isVideoCall = message.callType === 'video';
     return (
       <div className={`flex flex-col ${message.mine ? 'items-end' : 'items-start'}`}>

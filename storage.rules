@@ -37,16 +37,16 @@ service firebase.storage {
 
     // Post videos & thumbnails at posts/{postId}/video.mp4 (max 100 MB)
     match /posts/{postId}/{fileName} {
-      allow read: if isVerifiedUser();
+      allow read: if true;
       allow write: if isVerifiedUser()
         && request.resource.size <= 100 * 1024 * 1024
         && (request.resource.contentType.matches('video/.*') || request.resource.contentType.matches('image/.*'));
       allow delete: if isVerifiedUser();
     }
 
-    // Post videos (max 100 MB, owner write/delete, authenticated read)
+    // Post videos (max 100 MB, owner write/delete, public read for <video> playback)
     match /post_videos/{userId}/{fileName} {
-      allow read: if isVerifiedUser();
+      allow read: if true;
       allow write: if isVerifiedUser()
         && request.auth.uid == userId
         && request.resource.size <= 100 * 1024 * 1024

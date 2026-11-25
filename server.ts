@@ -785,6 +785,9 @@ app.use(
     },
   }),
 );
+app.use('/uploads', (_req: Request, res: Response) => {
+  res.status(404).end();
+});
 
 // WebSocket hub
 const server = http.createServer(app);

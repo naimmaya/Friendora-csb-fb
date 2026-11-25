@@ -491,7 +491,7 @@ export function subscribePostsPermanent(
             const looksLikeVideo = (url: string | null): boolean => {
               if (!url) return false;
               const lower = url.toLowerCase();
-              if (lower.startsWith('data:video/')) return true;
+              if (lower.startsWith('data:video/') || lower.startsWith('fsvideo://')) return true;
               if (/\/uploads\/(?:.+\/)?vid_/.test(lower)) return true;
               const noQuery = lower.split('?')[0].split('#')[0];
               return (
@@ -526,6 +526,7 @@ export function subscribePostsPermanent(
               video_url: rawVideoUrl,
               media_type: resolvedMediaType,
               video_thumbnail: rawVideoThumb,
+              duration: typeof data.duration === 'number' && data.duration > 0 ? data.duration : 0,
               comments_disabled: Boolean(data.commentsDisabled),
               edited: Boolean(data.edited),
               page_id: typeof data.pageId === 'string' && data.pageId ? data.pageId : null,
@@ -576,6 +577,7 @@ export async function createPostPermanent(
     imageUrl?: string | null;
     videoUrl?: string | null;
     videoThumbnail?: string | null;
+    duration?: number;
     mediaType?: 'text' | 'image' | 'video';
     page?: SocialPageDoc | null;
   },
@@ -587,6 +589,10 @@ export async function createPostPermanent(
   const cleanImage = clamp(payload.imageUrl, 550000);
   const cleanVideo = clamp(payload.videoUrl, 2048);
   const cleanThumbnail = clamp(payload.videoThumbnail ?? (cleanVideo ? cleanImage : ''), 550000);
+  const cleanDuration =
+    typeof payload.duration === 'number' && Number.isFinite(payload.duration)
+      ? Math.max(0, Math.min(3600, Math.round(payload.duration)))
+      : 0;
 
   if (payload.mediaType === 'video' && !cleanVideo) {
     throw new Error('Video upload did not finish. Please try uploading again.');
@@ -615,6 +621,7 @@ export async function createPostPermanent(
       videoUrl: cleanVideo,
       mediaType: resolvedMediaType,
       videoThumbnail: cleanThumbnail,
+      duration: cleanDuration,
       commentsDisabled: false,
       edited: false,
       pageId: page ? clamp(page.pageId, 128) : '',
@@ -639,6 +646,7 @@ export async function createPostPermanent(
     video_url: cleanVideo || null,
     media_type: resolvedMediaType,
     video_thumbnail: cleanThumbnail || null,
+    duration: cleanDuration,
     comments_disabled: false,
     edited: false,
     page_id: page ? page.pageId : null,

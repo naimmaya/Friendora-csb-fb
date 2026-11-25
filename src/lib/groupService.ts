@@ -22,9 +22,9 @@ import type {
 import {db, handleFirestoreError, OperationType} from './firebase';
 import {deleteFirebaseStorageUrlIfApplicable} from './mediaUpload';
 
-export const MAX_GROUP_MEMBERS = 40;
-export const MAX_GROUP_CALL_PARTICIPANTS = 40;
-export const GROUP_FULL_ERROR_MSG = 'Group is full - Max 40 members';
+export const MAX_GROUP_MEMBERS = 12;
+export const MAX_GROUP_CALL_PARTICIPANTS = 12;
+export const GROUP_FULL_ERROR_MSG = 'Group is full - Max 12 members';
 
 export function formatCallParticipantsSummary(
   activeUids: string[],
@@ -614,16 +614,17 @@ export function formatGroupCallLogMessage(
   durationSec: number,
   joinedCount: number,
 ): string {
+  if (joinedCount <= 1) {
+    return 'Missed Group Call';
+  }
   const label = type === 'video' ? 'Group Video Call' : 'Group Audio Call';
-  const joinedText = `${Math.max(1, joinedCount)} joined`;
+  const joinedText = `${joinedCount} joined`;
   if (durationSec < 60) {
     const s = Math.max(1, Math.round(durationSec));
     return `${label} - ${s} sec, ${joinedText}`;
   }
-  const mins = Math.floor(durationSec / 60);
-  const rem = Math.round(durationSec % 60);
-  const durStr = rem > 0 ? `${mins}:${String(rem).padStart(2, '0')} min` : `${mins} min`;
-  return `${label} - ${durStr}, ${joinedText}`;
+  const mins = Math.max(1, Math.round(durationSec / 60));
+  return `${label} - ${mins} min, ${joinedText}`;
 }
 
 export interface GroupCallParticipantDoc {
@@ -797,7 +798,7 @@ export async function joinGroupCallPermanent(
 
     const alreadyInCall = current.activeUids.includes(user.uid);
     if (!alreadyInCall && current.activeUids.length >= MAX_GROUP_CALL_PARTICIPANTS) {
-      throw new Error('Group call is full (Max 40 participants).');
+      throw new Error(`Group call is full (Max ${MAX_GROUP_CALL_PARTICIPANTS} participants).`);
     }
 
     const activeUids = Array.from(new Set([...current.activeUids, user.uid])).slice(

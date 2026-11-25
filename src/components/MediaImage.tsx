@@ -5,18 +5,21 @@ import {
   Maximize2,
   Pause,
   Play,
-  RotateCcw,
   Volume2,
   VolumeX,
 } from 'lucide-react';
 import {getInitials} from '../lib/api';
 import {resolveMediaUrl} from '../lib/localFallback';
-import {getPostVideoStorageUrl, refreshFirebaseStorageUrl} from '../lib/mediaUpload';
+import {
+  getPostVideoStorageUrl,
+  refreshFirebaseStorageUrl,
+  resolveCloudVideoUrl,
+} from '../lib/mediaUpload';
 
 export function useResolvedMediaUrl(src?: string | null): string | null {
   const [resolved, setResolved] = useState<string | null>(() => {
     if (!src || !src.trim()) return null;
-    return src.startsWith('idb://') ? null : src;
+    return src.startsWith('idb://') || src.startsWith('fsvideo://') ? null : src;
   });
 
   useEffect(() => {
@@ -24,6 +27,14 @@ export function useResolvedMediaUrl(src?: string | null): string | null {
     if (!src || !src.trim()) {
       setResolved(null);
       return;
+    }
+    if (src.startsWith('fsvideo://')) {
+      resolveCloudVideoUrl(src).then((url) => {
+        if (active) setResolved(url);
+      });
+      return () => {
+        active = false;
+      };
     }
     if (!src.startsWith('idb://')) {
       setResolved(src);
@@ -185,27 +196,29 @@ interface PostVideoProps {
   src: string;
   poster?: string | null;
   postId?: string;
+  durationSec?: number;
   className?: string;
 }
 
-export function PostVideo({src, poster, postId, className = ''}: PostVideoProps) {
+export function PostVideo({src, poster, postId, durationSec = 0, className = ''}: PostVideoProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const [overrideSrc, setOverrideSrc] = useState<string | null>(null);
-  const [retryCount, setRetryCount] = useState(0);
-  const [failed, setFailed] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [videoReady, setVideoReady] = useState(false);
+  const [loadingCloud, setLoadingCloud] = useState(false);
   const [buffering, setBuffering] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(true);
   const [soundBadge, setSoundBadge] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
+  const [duration, setDuration] = useState(durationSec > 0 ? durationSec : 0);
 
   const userPausedRef = useRef(false);
   const autoRefreshedRef = useRef(false);
   const playOnReadyRef = useRef(false);
+  const unmuteOnReadyRef = useRef(false);
   const soundBadgeTimerRef = useRef<number | null>(null);
 
   const resolvedSrc = useResolvedMediaUrl(src);
@@ -215,27 +228,35 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
   // Reset state whenever the source URL changes
   useEffect(() => {
     setOverrideSrc(null);
-    setRetryCount(0);
-    setFailed(false);
+    setReloadNonce(0);
     setVideoReady(false);
+    setLoadingCloud(Boolean(src && src.startsWith('fsvideo://') && !resolvedSrc));
     setBuffering(false);
     setPlaying(false);
     setMuted(true);
     setCurrentTime(0);
-    setDuration(0);
+    setDuration(durationSec > 0 ? durationSec : 0);
     userPausedRef.current = false;
     autoRefreshedRef.current = false;
     playOnReadyRef.current = false;
+    unmuteOnReadyRef.current = false;
+  }, [src, durationSec]);
+
+  useEffect(() => {
+    if (resolvedSrc) {
+      setLoadingCloud(false);
+    }
   }, [resolvedSrc]);
 
   // Auto-recover older video posts if videoUrl is missing by checking posts/{postId}/video.mp4
   useEffect(() => {
-    if (activeVideoUrl || !postId || src.startsWith('idb://')) return;
+    if (activeVideoUrl || !postId || src.startsWith('idb://') || src.startsWith('fsvideo://')) {
+      return;
+    }
     let cancelled = false;
     void getPostVideoStorageUrl(postId).then((recoveredUrl) => {
       if (!cancelled && recoveredUrl) {
         setOverrideSrc(recoveredUrl);
-        setFailed(false);
       }
     });
     return () => {
@@ -257,12 +278,11 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
     }, 1100);
   }
 
-  // Facebook-style viewport Autoplay (auto-muted when visible >= 60%, auto-pause when scrolled away)
+  // Facebook-style viewport Autoplay (auto-muted when visible >= 50%, auto-pause when scrolled away)
   useEffect(() => {
     const container = containerRef.current;
     const video = videoRef.current;
-    if (!container || !video || !activeVideoUrl || failed) return;
-
+    if (!container || !video || !activeVideoUrl) return;
     if (typeof IntersectionObserver === 'undefined') return;
 
     const observer = new IntersectionObserver(
@@ -271,11 +291,11 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
         if (!entry || !videoRef.current) return;
         const v = videoRef.current;
         if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
-          if (!userPausedRef.current && v.paused && !failed) {
+          if (!userPausedRef.current && v.paused) {
             v.muted = true;
             setMuted(true);
             void v.play().catch(() => {
-              // Autoplay may still be deferred until interaction on some devices
+              // Mobile browsers may wait for direct tap
             });
           }
         } else if (entry.intersectionRatio < 0.25) {
@@ -289,15 +309,36 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
 
     observer.observe(container);
     return () => observer.disconnect();
-  }, [activeVideoUrl, failed, retryCount]);
+  }, [activeVideoUrl, reloadNonce]);
+
+  async function attemptSilentRecovery(): Promise<string | null> {
+    if (src.startsWith('fsvideo://')) {
+      const resolved = await resolveCloudVideoUrl(src);
+      if (resolved) {
+        setOverrideSrc(resolved);
+        return resolved;
+      }
+    }
+    const freshUrl =
+      (await refreshFirebaseStorageUrl(src)) ||
+      (postId ? await getPostVideoStorageUrl(postId) : null);
+    if (freshUrl) {
+      setOverrideSrc(freshUrl);
+      return freshUrl;
+    }
+    return null;
+  }
 
   // Tapping the video surface:
   // - If currently playing muted (autoplayed), tapping turns sound ON (Facebook behavior)
   // - If playing with sound ON, tapping pauses
-  // - If paused, tapping plays with sound ON
+  // - If paused, tapping plays with sound ON (silently reloading if needed)
   async function handleSurfaceTap() {
     const v = videoRef.current;
-    if (!v || failed) return;
+    if (!v) {
+      await handleTapWhenUnloaded();
+      return;
+    }
 
     if (!v.paused && !v.ended && v.muted) {
       v.muted = false;
@@ -309,9 +350,23 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
     await togglePlay(true);
   }
 
+  async function handleTapWhenUnloaded() {
+    setLoadingCloud(true);
+    playOnReadyRef.current = true;
+    unmuteOnReadyRef.current = true;
+    const recovered = await attemptSilentRecovery();
+    setLoadingCloud(false);
+    if (recovered) {
+      setReloadNonce((n) => n + 1);
+    }
+  }
+
   async function togglePlay(preferUnmuted = false) {
     const v = videoRef.current;
-    if (!v) return;
+    if (!v) {
+      await handleTapWhenUnloaded();
+      return;
+    }
     if (v.paused || v.ended) {
       userPausedRef.current = false;
       if (preferUnmuted) {
@@ -321,6 +376,19 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
       try {
         await v.play();
       } catch {
+        // If media element had a stale error/network hiccup, silently recover & play
+        if (v.error || v.networkState === HTMLMediaElement.NETWORK_NO_SOURCE) {
+          playOnReadyRef.current = true;
+          unmuteOnReadyRef.current = preferUnmuted;
+          const recovered = await attemptSilentRecovery();
+          if (recovered) {
+            setReloadNonce((n) => n + 1);
+            return;
+          }
+          if (activeVideoUrl && !activeVideoUrl.startsWith('blob:') && !activeVideoUrl.startsWith('data:')) {
+            v.load();
+          }
+        }
         // Fallback: mute and retry if browser autoplay policy blocks unmuted play
         v.muted = true;
         setMuted(true);
@@ -358,82 +426,63 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
   }
 
   async function handleVideoError() {
-    // Auto-attempt 1 silent Firebase Storage URL refresh / posts/{postId}/video.mp4 recovery before showing Tap to retry
+    setBuffering(false);
+    setPlaying(false);
     if (!autoRefreshedRef.current) {
       autoRefreshedRef.current = true;
-      const freshUrl =
-        (await refreshFirebaseStorageUrl(src)) ||
-        (postId ? await getPostVideoStorageUrl(postId) : null);
+      const freshUrl = await attemptSilentRecovery();
       if (freshUrl && freshUrl !== activeVideoUrl) {
-        setOverrideSrc(freshUrl);
-        setFailed(false);
+        setReloadNonce((n) => n + 1);
         return;
       }
     }
-    playOnReadyRef.current = false;
-    setBuffering(false);
-    setPlaying(false);
-    setFailed(true);
-  }
-
-  async function handleRetry() {
-    setFailed(false);
-    setBuffering(true);
+    // Keep clean thumbnail visible (NEVER display "Video unavailable" or "Tap to retry")
     setVideoReady(false);
-    userPausedRef.current = false;
-    playOnReadyRef.current = true;
-
-    const freshUrl =
-      (await refreshFirebaseStorageUrl(src)) ||
-      (postId ? await getPostVideoStorageUrl(postId) : null);
-    if (freshUrl) {
-      setOverrideSrc(freshUrl);
-    } else if (resolvedSrc && !resolvedSrc.startsWith('blob:') && !resolvedSrc.startsWith('data:')) {
-      const sep = resolvedSrc.includes('?') ? '&' : '?';
-      setOverrideSrc(`${resolvedSrc}${sep}retry=${Date.now()}`);
-    }
-    setRetryCount((c) => c + 1);
   }
 
-  // If no playable URL yet (resolving idb:// or empty legacy URL), show thumbnail + Tap to retry (NEVER "Video unavailable")
+  // While permanent cloud video is resolving or if no URL yet, display clean thumbnail + Play button (NEVER "Video unavailable" / "Tap to retry")
   if (!activeVideoUrl) {
     return (
-      <div className={`relative w-full aspect-video bg-[#0F1115] overflow-hidden border-y border-[#E5E8EE] dark:border-[#252A34] ${className}`}>
+      <div
+        className={`relative w-full aspect-video bg-[#0F1115] overflow-hidden border-y border-[#E5E8EE] dark:border-[#252A34] ${className}`}
+      >
         {resolvedPoster && (
           <img
             src={resolvedPoster}
-            alt="Video preview"
+            alt="Video thumbnail"
             referrerPolicy="no-referrer"
             className="w-full h-full object-cover"
           />
         )}
-        <div className="absolute inset-0 bg-black/45 flex flex-col items-center justify-center gap-2 text-white">
-          {src.startsWith('idb://') ? (
-            <Loader2 className="w-7 h-7 animate-spin text-white/85" />
-          ) : (
-            <button
-              type="button"
-              onClick={() => void handleRetry()}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/15 hover:bg-white/25 backdrop-blur-md border border-white/25 text-xs sm:text-sm font-semibold text-white cursor-pointer"
-            >
-              <RotateCcw className="w-4 h-4" />
-              <span>Tap to retry</span>
-            </button>
-          )}
-        </div>
+        <button
+          type="button"
+          onClick={() => void handleTapWhenUnloaded()}
+          aria-label="Play video"
+          className="absolute inset-0 bg-black/25 hover:bg-black/35 flex items-center justify-center transition-colors cursor-pointer"
+        >
+          <span className="w-16 h-16 rounded-full bg-black/70 border border-white/30 text-white flex items-center justify-center shadow-xl">
+            {loadingCloud || src.startsWith('idb://') ? (
+              <Loader2 className="w-7 h-7 animate-spin" />
+            ) : (
+              <Play className="w-7 h-7 fill-current ml-1" />
+            )}
+          </span>
+        </button>
       </div>
     );
   }
 
-  const progressPct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+  const effectiveDuration = duration > 0 ? duration : durationSec > 0 ? durationSec : 0;
+  const progressPct =
+    effectiveDuration > 0 ? Math.min(100, (currentTime / effectiveDuration) * 100) : 0;
 
   return (
     <div
       ref={containerRef}
       className={`relative w-full bg-black overflow-hidden border-y border-[#E5E8EE] dark:border-[#252A34] group ${className}`}
     >
-      {/* 1-second frame thumbnail displayed seamlessly until video frame loads (or behind retry overlay) */}
-      {resolvedPoster && (!videoReady || failed) && (
+      {/* Crisp 1-second video thumbnail displayed seamlessly until video frames load */}
+      {resolvedPoster && !videoReady && (
         <img
           src={resolvedPoster}
           alt="Video thumbnail"
@@ -443,7 +492,7 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
       )}
 
       <video
-        key={`${activeVideoUrl}_${retryCount}`}
+        key={`${activeVideoUrl}_${reloadNonce}`}
         ref={videoRef}
         src={activeVideoUrl}
         poster={resolvedPoster || undefined}
@@ -453,13 +502,11 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
         onClick={() => void handleSurfaceTap()}
         onPlay={() => {
           setPlaying(true);
-          setFailed(false);
         }}
         onPlaying={() => {
           setPlaying(true);
           setVideoReady(true);
           setBuffering(false);
-          setFailed(false);
         }}
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
@@ -469,9 +516,17 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
           setBuffering(false);
           if (playOnReadyRef.current && videoRef.current) {
             playOnReadyRef.current = false;
-            videoRef.current.muted = true;
-            setMuted(true);
-            void videoRef.current.play().catch(() => {});
+            const wantUnmuted = unmuteOnReadyRef.current;
+            unmuteOnReadyRef.current = false;
+            videoRef.current.muted = !wantUnmuted;
+            setMuted(!wantUnmuted);
+            void videoRef.current.play().catch(() => {
+              if (videoRef.current) {
+                videoRef.current.muted = true;
+                setMuted(true);
+                void videoRef.current.play().catch(() => {});
+              }
+            });
           }
         }}
         onLoadedData={() => {
@@ -484,13 +539,11 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
         }}
         onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
         onError={() => void handleVideoError()}
-        className={`relative w-full max-h-[540px] min-h-[220px] mx-auto block cursor-pointer object-contain bg-transparent ${
-          failed ? 'opacity-0 pointer-events-none' : 'opacity-100'
-        }`}
+        className="relative w-full max-h-[540px] min-h-[220px] mx-auto block cursor-pointer object-contain bg-transparent"
       />
 
-      {/* Buffering spinner overlay (only while loading frames, never hides thumbnail) */}
-      {!failed && buffering && (
+      {/* Buffering spinner overlay only while actively buffering */}
+      {buffering && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/20">
           <span className="w-12 h-12 rounded-full bg-black/60 backdrop-blur-xs flex items-center justify-center text-white">
             <Loader2 className="w-6 h-6 animate-spin" />
@@ -499,7 +552,7 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
       )}
 
       {/* Brief Sound On / Muted feedback pill when user taps video */}
-      {soundBadge && !failed && (
+      {soundBadge && (
         <div className="pointer-events-none absolute top-3 right-3 px-3 py-1 rounded-full bg-black/70 backdrop-blur-xs text-white text-xs font-semibold flex items-center gap-1.5 shadow-md">
           {muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
           <span>{soundBadge}</span>
@@ -507,7 +560,7 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
       )}
 
       {/* Subtle "Tap for sound" pill while autoplaying muted like Facebook */}
-      {playing && muted && !failed && !soundBadge && (
+      {playing && muted && !soundBadge && (
         <button
           type="button"
           onClick={(e) => {
@@ -521,8 +574,8 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
         </button>
       )}
 
-      {/* Centered Play Overlay when paused (and not failed) */}
-      {!playing && !failed && !buffering && (
+      {/* Centered Play Overlay when paused */}
+      {!playing && !buffering && (
         <button
           type="button"
           onClick={() => void togglePlay(true)}
@@ -535,81 +588,65 @@ export function PostVideo({src, poster, postId, className = ''}: PostVideoProps)
         </button>
       )}
 
-      {/* Clean "Tap to retry" overlay on load error (NEVER "Video unavailable") */}
-      {failed && (
+      {/* Facebook-style Bottom Controls: [Play/Pause] [Progress Bar] [Time] [Mute/Unmute] [Full Screen] */}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/45 to-transparent px-3 pt-6 pb-2.5 flex items-center gap-2.5 text-white"
+      >
         <button
           type="button"
-          onClick={() => void handleRetry()}
-          className="absolute inset-0 flex flex-col items-center justify-center gap-2.5 bg-black/60 hover:bg-black/70 backdrop-blur-[2px] text-white transition-colors cursor-pointer"
+          onClick={() => void togglePlay(false)}
+          aria-label={playing ? 'Pause video' : 'Play video'}
+          className="w-8 h-8 rounded-full hover:bg-white/15 flex items-center justify-center shrink-0 cursor-pointer"
         >
-          <span className="w-14 h-14 rounded-full bg-white/15 border border-white/30 flex items-center justify-center shadow-lg">
-            <RotateCcw className="w-6 h-6" />
-          </span>
-          <span className="text-sm font-semibold">Tap to retry</span>
+          {playing ? (
+            <Pause className="w-4 h-4 fill-current" />
+          ) : (
+            <Play className="w-4 h-4 fill-current ml-0.5" />
+          )}
         </button>
-      )}
 
-      {/* Facebook-style Bottom Controls: [Play/Pause] [Progress Bar] [Time] [Mute/Unmute] [Full Screen] */}
-      {!failed && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/45 to-transparent px-3 pt-6 pb-2.5 flex items-center gap-2.5 text-white"
+        {/* Progress bar */}
+        <input
+          type="range"
+          min={0}
+          max={effectiveDuration || 100}
+          step={0.1}
+          value={currentTime}
+          aria-label="Seek video"
+          onChange={(e) => {
+            const next = Number(e.target.value);
+            if (videoRef.current) videoRef.current.currentTime = next;
+            setCurrentTime(next);
+          }}
+          style={{
+            background: `linear-gradient(to right, #3B82F6 ${progressPct}%, rgba(255,255,255,0.3) ${progressPct}%)`,
+          }}
+          className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer accent-[#3B82F6]"
+        />
+
+        <span className="text-[11px] font-medium tabular-nums shrink-0 text-white/90">
+          {formatVideoTime(currentTime)} / {formatVideoTime(effectiveDuration)}
+        </span>
+
+        <button
+          type="button"
+          onClick={toggleMute}
+          aria-label={muted ? 'Unmute video' : 'Mute video'}
+          className="w-8 h-8 rounded-full hover:bg-white/15 flex items-center justify-center shrink-0 cursor-pointer"
         >
-          <button
-            type="button"
-            onClick={() => void togglePlay(false)}
-            aria-label={playing ? 'Pause video' : 'Play video'}
-            className="w-8 h-8 rounded-full hover:bg-white/15 flex items-center justify-center shrink-0 cursor-pointer"
-          >
-            {playing ? (
-              <Pause className="w-4 h-4 fill-current" />
-            ) : (
-              <Play className="w-4 h-4 fill-current ml-0.5" />
-            )}
-          </button>
+          {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+        </button>
 
-          {/* Progress bar */}
-          <input
-            type="range"
-            min={0}
-            max={duration || 100}
-            step={0.1}
-            value={currentTime}
-            aria-label="Seek video"
-            onChange={(e) => {
-              const next = Number(e.target.value);
-              if (videoRef.current) videoRef.current.currentTime = next;
-              setCurrentTime(next);
-            }}
-            style={{
-              background: `linear-gradient(to right, #3B82F6 ${progressPct}%, rgba(255,255,255,0.3) ${progressPct}%)`,
-            }}
-            className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer accent-[#3B82F6]"
-          />
-
-          <span className="text-[11px] font-medium tabular-nums shrink-0 text-white/90">
-            {formatVideoTime(currentTime)} / {formatVideoTime(duration)}
-          </span>
-
-          <button
-            type="button"
-            onClick={toggleMute}
-            aria-label={muted ? 'Unmute video' : 'Mute video'}
-            className="w-8 h-8 rounded-full hover:bg-white/15 flex items-center justify-center shrink-0 cursor-pointer"
-          >
-            {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-          </button>
-
-          <button
-            type="button"
-            onClick={toggleFullscreen}
-            aria-label="Full screen video"
-            className="w-8 h-8 rounded-full hover:bg-white/15 flex items-center justify-center shrink-0 cursor-pointer"
-          >
-            <Maximize2 className="w-4 h-4" />
-          </button>
-        </div>
-      )}
+        <button
+          type="button"
+          onClick={toggleFullscreen}
+          aria-label="Full screen video"
+          className="w-8 h-8 rounded-full hover:bg-white/15 flex items-center justify-center shrink-0 cursor-pointer"
+        >
+          <Maximize2 className="w-4 h-4" />
+        </button>
+      </div>
     </div>
   );
 }

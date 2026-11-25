@@ -20,6 +20,7 @@ import {
   MAX_VIDEO_BYTES,
   MAX_VIDEO_DURATION_SEC,
   uploadAttachmentReal,
+  uploadPostVideoPermanent,
 } from '../lib/mediaUpload';
 import type {PostItem, SocialPageDoc, UserProfile} from '../types';
 import {Avatar} from './MediaImage';
@@ -35,8 +36,12 @@ interface PendingPostMedia {
   kind: 'image' | 'video';
   file: File;
   previewUrl: string;
+  postId?: string;
   durationSec?: number;
   thumbnailDataUrl?: string | null;
+  uploadedUrl?: string | null;
+  uploadedThumbnailUrl?: string | null;
+  uploadState?: 'idle' | 'uploading' | 'done' | 'error';
 }
 
 function isVideoFile(file: File): boolean {
@@ -68,6 +73,7 @@ export function PostComposer({
 
   const combinedInputRef = useRef<HTMLInputElement>(null);
   const videoPreviewRef = useRef<HTMLVideoElement>(null);
+  const activeUploadSessionRef = useRef(0);
 
   const firstName = currentUser.name.split(' ')[0] || 'there';
   const composerAvatar = postingAsPage ? postingAsPage.pagePhoto : currentUser.avatar_url;
@@ -81,10 +87,96 @@ export function PostComposer({
   }, [pendingMedia?.previewUrl]);
 
   function clearMedia() {
+    activeUploadSessionRef.current += 1;
     setPendingMedia(null);
     setVideoPlayingPreview(false);
+    setUploadProgress(0);
+    setUploadStage(null);
     setError(null);
     setCanRetry(false);
+  }
+
+  // Upload selected video 100% BEFORE allowing post creation (Post button stays disabled until 100% done)
+  async function startVideoUploadNow(media: PendingPostMedia) {
+    const sessionId = ++activeUploadSessionRef.current;
+    const postId = media.postId || generatePostDocId();
+
+    setError(null);
+    setCanRetry(false);
+    setUploadProgress(2);
+    setUploadStage('Uploading Video...');
+    setPendingMedia((prev) =>
+      prev && prev.previewUrl === media.previewUrl
+        ? {...prev, postId, uploadState: 'uploading', uploadedUrl: null}
+        : prev,
+    );
+
+    try {
+      const uploaded = await uploadPostVideoPermanent(media.file, {
+        postId,
+        durationSec: media.durationSec || 0,
+        onProgress: (pct) => {
+          if (activeUploadSessionRef.current !== sessionId) return;
+          setUploadProgress(pct);
+        },
+      });
+
+      if (activeUploadSessionRef.current !== sessionId) return;
+
+      if (!uploaded.url || !uploaded.url.trim()) {
+        throw new Error('Video upload failed, try again.');
+      }
+
+      let finalThumbUrl = media.thumbnailDataUrl || null;
+      if (uploaded.storageBacked && media.thumbnailDataUrl) {
+        try {
+          const thumbResp = await fetch(media.thumbnailDataUrl);
+          const thumbBlob = await thumbResp.blob();
+          const uploadedThumb = await uploadAttachmentReal(thumbBlob, {
+            folder: `posts/${postId}`,
+            exactStoragePath: `posts/${postId}/thumbnail.jpg`,
+            kind: 'image',
+            fileName: 'thumbnail.jpg',
+          });
+          if (uploadedThumb.url) {
+            finalThumbUrl = uploadedThumb.url;
+          }
+        } catch {
+          // Keep compact 1-second JPEG data URL thumbnail
+        }
+      }
+
+      if (activeUploadSessionRef.current !== sessionId) return;
+
+      setUploadProgress(100);
+      setUploadStage(null);
+      setPendingMedia((prev) =>
+        prev && prev.previewUrl === media.previewUrl
+          ? {
+              ...prev,
+              postId,
+              uploadedUrl: uploaded.url.trim(),
+              uploadedThumbnailUrl: finalThumbUrl,
+              uploadState: 'done',
+            }
+          : prev,
+      );
+    } catch (err) {
+      if (activeUploadSessionRef.current !== sessionId) return;
+      setUploadProgress(0);
+      setUploadStage(null);
+      setCanRetry(true);
+      setPendingMedia((prev) =>
+        prev && prev.previewUrl === media.previewUrl
+          ? {...prev, postId, uploadState: 'error', uploadedUrl: null}
+          : prev,
+      );
+      setError(
+        err instanceof Error
+          ? formatFirestoreErrorMessage(err)
+          : 'Video upload failed, try again.',
+      );
+    }
   }
 
   async function handleMediaPicked(e: ChangeEvent<HTMLInputElement>) {
@@ -92,10 +184,13 @@ export function PostComposer({
     e.target.value = '';
     if (!file) return;
 
+    activeUploadSessionRef.current += 1;
     setError(null);
     setCanRetry(false);
     setSavedToast(null);
     setVideoPlayingPreview(false);
+    setUploadProgress(0);
+    setUploadStage(null);
 
     if (isVideoFile(file)) {
       if (file.size > MAX_VIDEO_BYTES) {
@@ -113,17 +208,26 @@ export function PostComposer({
           return;
         }
         const previewUrl = URL.createObjectURL(file);
-        setPendingMedia({
+        const postId = generatePostDocId();
+        const nextMedia: PendingPostMedia = {
           kind: 'video',
           file,
           previewUrl,
+          postId,
           durationSec: meta.durationSec,
           thumbnailDataUrl: meta.thumbnailDataUrl,
-        });
+          uploadedUrl: null,
+          uploadedThumbnailUrl: meta.thumbnailDataUrl,
+          uploadState: 'uploading',
+        };
+        setPendingMedia(nextMedia);
+        setPreparingMedia(false);
+        // Begin 100% upload immediately; Post button remains disabled until upload finishes
+        void startVideoUploadNow(nextMedia);
+        return;
       } finally {
         setPreparingMedia(false);
       }
-      return;
     }
 
     if (isImageFile(file)) {
@@ -132,6 +236,7 @@ export function PostComposer({
         kind: 'image',
         file,
         previewUrl,
+        uploadState: 'idle',
       });
       return;
     }
@@ -139,9 +244,23 @@ export function PostComposer({
     setError('Please select a Photo (JPG, PNG, WEBP, GIF) or Video (MP4, WEBM, MOV).');
   }
 
+  const isVideoUploading =
+    pendingMedia?.kind === 'video' && pendingMedia.uploadState === 'uploading';
+  const isVideoReady =
+    pendingMedia?.kind !== 'video' ||
+    (pendingMedia.uploadState === 'done' && Boolean(pendingMedia.uploadedUrl));
+
   async function publishPost() {
-    if (submitting || preparingMedia) return;
+    if (submitting || preparingMedia || isVideoUploading) return;
     if (!content.trim() && !pendingMedia) return;
+
+    // Never allow creating a video post unless upload has finished 100% with a real URL
+    if (pendingMedia?.kind === 'video' && (!pendingMedia.uploadedUrl || pendingMedia.uploadState !== 'done')) {
+      if (pendingMedia.uploadState === 'error') {
+        void startVideoUploadNow(pendingMedia);
+      }
+      return;
+    }
 
     setError(null);
     setCanRetry(false);
@@ -150,10 +269,11 @@ export function PostComposer({
     setUploadProgress(0);
 
     try {
-      const postId = generatePostDocId();
+      const postId = pendingMedia?.postId || generatePostDocId();
       let uploadedImageUrl: string | null = null;
       let uploadedVideoUrl: string | null = null;
       let uploadedVideoThumbnail: string | null = null;
+      let videoDurationSec = 0;
       let mediaType: 'text' | 'image' | 'video' = 'text';
 
       if (pendingMedia) {
@@ -163,36 +283,10 @@ export function PostComposer({
 
         if (pendingMedia.kind === 'video') {
           mediaType = 'video';
-          setUploadStage('Uploading video...');
-          const uploaded = await uploadAttachmentReal(pendingMedia.file, {
-            folder: `posts/${postId}`,
-            exactStoragePath: `posts/${postId}/video.mp4`,
-            kind: 'video',
-            fileName: 'video.mp4',
-            onProgress: (pct) => setUploadProgress(pct),
-          });
-          if (!uploaded.url || !uploaded.url.trim()) {
-            throw new Error('Video upload did not return a playable URL. Please tap Retry.');
-          }
-          uploadedVideoUrl = uploaded.url.trim();
-          uploadedVideoThumbnail = pendingMedia.thumbnailDataUrl || null;
-          if (uploaded.storageBacked && pendingMedia.thumbnailDataUrl) {
-            try {
-              const thumbResp = await fetch(pendingMedia.thumbnailDataUrl);
-              const thumbBlob = await thumbResp.blob();
-              const uploadedThumb = await uploadAttachmentReal(thumbBlob, {
-                folder: `posts/${postId}`,
-                exactStoragePath: `posts/${postId}/thumbnail.jpg`,
-                kind: 'image',
-                fileName: 'thumbnail.jpg',
-              });
-              if (uploadedThumb.url) {
-                uploadedVideoThumbnail = uploadedThumb.url;
-              }
-            } catch {
-              // Keep compact 1-second JPEG data URL thumbnail
-            }
-          }
+          uploadedVideoUrl = pendingMedia.uploadedUrl!.trim();
+          uploadedVideoThumbnail =
+            pendingMedia.uploadedThumbnailUrl || pendingMedia.thumbnailDataUrl || null;
+          videoDurationSec = pendingMedia.durationSec || 0;
           uploadedImageUrl = null;
         } else {
           mediaType = 'image';
@@ -212,14 +306,16 @@ export function PostComposer({
         }
       }
 
-      // Only create Firestore post AFTER media upload finishes and returns a real download URL
+      // Only create Firestore post AFTER media upload is 100% complete with a real playable URL
       setUploadStage('Saving post...');
+      setUploadProgress(100);
       const post = await createPostPermanent(currentUser, {
         postId,
         content: content.trim(),
         imageUrl: uploadedImageUrl,
         videoUrl: uploadedVideoUrl,
         videoThumbnail: uploadedVideoThumbnail,
+        duration: videoDurationSec,
         mediaType,
         page: postingAsPage,
       });
@@ -254,6 +350,13 @@ export function PostComposer({
     e.preventDefault();
     void publishPost();
   }
+
+  const postButtonDisabled =
+    submitting ||
+    preparingMedia ||
+    isVideoUploading ||
+    !isVideoReady ||
+    (!content.trim() && !pendingMedia);
 
   return (
     <form
@@ -379,13 +482,13 @@ export function PostComposer({
             </div>
           )}
 
-          {/* Real 0% - 100% Upload Progress Bar */}
-          {submitting && uploadStage && (
+          {/* Real 0% - 100% Upload Progress Bar (while video uploads or post submits) */}
+          {(isVideoUploading || (submitting && uploadStage)) && (
             <div className="mt-3 rounded-xl bg-[#1877F2]/8 dark:bg-[#3B82F6]/15 border border-[#1877F2]/20 px-3.5 py-2.5 space-y-1.5">
               <div className="flex items-center justify-between text-xs font-semibold text-[#1877F2] dark:text-[#60A5FA]">
                 <span className="inline-flex items-center gap-2">
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span>{uploadStage}</span>
+                  <span>{uploadStage || 'Uploading Video...'}</span>
                 </span>
                 <span className="tabular-nums">{uploadProgress}%</span>
               </div>
@@ -398,6 +501,17 @@ export function PostComposer({
             </div>
           )}
 
+          {/* Uploaded 100% Ready indicator for videos */}
+          {pendingMedia?.kind === 'video' &&
+            pendingMedia.uploadState === 'done' &&
+            Boolean(pendingMedia.uploadedUrl) &&
+            !submitting && (
+              <div className="mt-2.5 flex items-center gap-2 rounded-xl bg-[#ECFDF5] dark:bg-[#0F2E22] border border-[#A7F3D0] dark:border-[#166534] px-3 py-2 text-xs font-medium text-[#065F46] dark:text-[#A7F3D0]">
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-[#16A34A] dark:text-[#4ADE80]" />
+                <span>Video uploaded 100% — ready to Post</span>
+              </div>
+            )}
+
           {/* Real Error Banner with Retry button */}
           {error && (
             <div
@@ -408,10 +522,16 @@ export function PostComposer({
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                 <span>{error}</span>
               </span>
-              {canRetry && !submitting && (
+              {canRetry && !submitting && !isVideoUploading && (
                 <button
                   type="button"
-                  onClick={() => void publishPost()}
+                  onClick={() => {
+                    if (pendingMedia?.kind === 'video' && pendingMedia.uploadState === 'error') {
+                      void startVideoUploadNow(pendingMedia);
+                    } else {
+                      void publishPost();
+                    }
+                  }}
                   className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#DC2626] hover:bg-[#B91C1C] text-white text-xs font-semibold shrink-0 cursor-pointer"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
@@ -442,7 +562,7 @@ export function PostComposer({
               />
               <button
                 type="button"
-                disabled={submitting || preparingMedia}
+                disabled={submitting || preparingMedia || isVideoUploading}
                 onClick={() => combinedInputRef.current?.click()}
                 className="inline-flex items-center gap-1.5 sm:gap-2 px-3 py-2 rounded-xl text-xs sm:text-sm font-medium text-[#334155] dark:text-[#CBD5E1] hover:bg-[#F4F6F9] dark:hover:bg-[#1E232D] transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
               >
@@ -462,11 +582,21 @@ export function PostComposer({
               )}
               <button
                 type="submit"
-                disabled={submitting || preparingMedia || (!content.trim() && !pendingMedia)}
+                disabled={postButtonDisabled}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#1877F2] hover:bg-[#166FE5] dark:bg-[#2563EB] dark:hover:bg-[#1D4ED8] text-white text-sm font-semibold transition-all active:scale-[0.985] disabled:opacity-50 whitespace-nowrap cursor-pointer"
               >
-                {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                <span>{submitting ? `${uploadProgress || 0}%` : 'Post'}</span>
+                {isVideoUploading || submitting ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
+                <span>
+                  {isVideoUploading
+                    ? `Uploading ${uploadProgress}%`
+                    : submitting
+                      ? `${uploadProgress || 0}%`
+                      : 'Post'}
+                </span>
               </button>
             </div>
           </div>

@@ -45,6 +45,7 @@ import {PostComposer} from './components/PostComposer';
 import {ProfileView} from './components/ProfileView';
 import {SearchPageView} from './components/SearchPageView';
 import {SettingsView} from './components/SettingsView';
+import {StoriesBar} from './components/StoriesSection';
 import {saveAccountToVault} from './lib/accountVault';
 import {subscribeIncomingCalls} from './lib/callService';
 import {
@@ -1487,6 +1488,12 @@ export default function App() {
                     )}
                   </button>
                 </div>
+
+                <StoriesBar
+                  currentUser={currentUser}
+                  hiddenUserUids={hiddenUserUids}
+                  onOpenProfile={(uid) => navigateApp('profile', uid)}
+                />
 
                 <PostComposer
                   currentUser={currentUser}

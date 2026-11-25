@@ -741,7 +741,13 @@ export function GroupChatWindow({
                   }`}
                 >
                   <UserPlus className="w-3.5 h-3.5" />
-                  <span>{isGroupFull ? 'Group Full (40)' : showAddMembers ? 'Done' : 'Add Member'}</span>
+                  <span>
+                    {isGroupFull
+                      ? `Group Full (${MAX_GROUP_MEMBERS})`
+                      : showAddMembers
+                        ? 'Done'
+                        : 'Add Member'}
+                  </span>
                 </button>
               )}
             </div>

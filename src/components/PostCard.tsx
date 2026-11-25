@@ -511,12 +511,13 @@ export function PostCard({
           <PostPhoto src={post.image_url} alt={`Photo shared by ${displayName}`} />
         )}
 
-        {/* Video (Facebook-style <video> player with 1s thumbnail, autoplay muted, tap for sound, Tap to retry) */}
+        {/* Video (Facebook-style <video> player with 1s thumbnail, autoplay muted, tap for sound) */}
         {(post.media_type === 'video' || Boolean(post.video_url)) && (
           <PostVideo
             src={post.video_url || ''}
             poster={post.video_thumbnail || post.image_url}
             postId={post.docId}
+            durationSec={post.duration}
           />
         )}
 

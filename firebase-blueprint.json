@@ -157,6 +157,7 @@
         "videoUrl": { "type": "string", "maxLength": 2048 },
         "mediaType": { "type": "string", "enum": ["text", "image", "video"] },
         "videoThumbnail": { "type": "string", "maxLength": 550000 },
+        "duration": { "type": "number" },
         "commentsDisabled": { "type": "boolean" },
         "edited": { "type": "boolean" },
         "pageId": { "type": "string", "maxLength": 128 },
@@ -675,6 +676,112 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["senderUid", "participantUids", "candidate", "sdpMid", "sdpMLineIndex", "createdAt"]
+    },
+    "VideoMedia": {
+      "title": "VideoMedia",
+      "description": "Permanent chunked video manifest stored in Cloud Firestore when Storage bucket is unavailable.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "mimeType": { "type": "string", "minLength": 5, "maxLength": 64 },
+        "totalBytes": { "type": "number" },
+        "totalChunks": { "type": "number" },
+        "durationSec": { "type": "number" },
+        "visibility": { "type": "string", "enum": ["public"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "authorUid", "mimeType", "totalBytes", "totalChunks", "durationSec", "visibility", "createdAt"]
+    },
+    "VideoMediaChunk": {
+      "title": "VideoMediaChunk",
+      "description": "Base64 binary chunk of a permanent Firestore-backed video post.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "mediaId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "index": { "type": "number" },
+        "data": { "type": "string", "minLength": 1, "maxLength": 750000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "mediaId", "authorUid", "index", "data", "createdAt"]
+    },
+    "Story": {
+      "title": "Story",
+      "description": "24-hour Facebook-style photo, video, or text story.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "userPhoto": { "type": "string", "maxLength": 450000 },
+        "mediaType": { "type": "string", "enum": ["image", "video", "text"] },
+        "storyImage": { "type": "string", "maxLength": 550000 },
+        "storyVideo": { "type": "string", "maxLength": 2048 },
+        "textContent": { "type": "string", "maxLength": 500 },
+        "bgGradient": { "type": "string", "maxLength": 120 },
+        "caption": { "type": "string", "maxLength": 300 },
+        "durationSec": { "type": "number" },
+        "visibility": { "type": "string", "enum": ["public"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "userId",
+        "userName",
+        "userPhoto",
+        "mediaType",
+        "storyImage",
+        "storyVideo",
+        "textContent",
+        "bgGradient",
+        "caption",
+        "durationSec",
+        "visibility",
+        "createdAt",
+        "expiresAt"
+      ]
+    },
+    "StoryViewer": {
+      "title": "StoryViewer",
+      "description": "Real-time record of a user who viewed a story.",
+      "type": "object",
+      "properties": {
+        "storyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "storyOwnerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "viewerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "viewerName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "viewerPhoto": { "type": "string", "maxLength": 450000 },
+        "viewedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["storyId", "storyOwnerId", "viewerId", "viewerName", "viewerPhoto", "viewedAt"]
+    },
+    "StoryReaction": {
+      "title": "StoryReaction",
+      "description": "Real-time user reaction on a story.",
+      "type": "object",
+      "properties": {
+        "storyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "storyOwnerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "userPhoto": { "type": "string", "maxLength": 450000 },
+        "reaction": { "type": "string", "enum": ["like", "love", "haha", "wow", "sad", "angry"] },
+        "reactedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "storyId",
+        "storyOwnerId",
+        "userId",
+        "userName",
+        "userPhoto",
+        "reaction",
+        "reactedAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -781,6 +888,26 @@
     "/calls/{callId}/calleeCandidates/{candidateId}": {
       "schema": { "$ref": "#/entities/IceCandidate" },
       "description": "Legacy callee ICE candidates for a 1-on-1 WebRTC call."
+    },
+    "/videoMedia/{mediaId}": {
+      "schema": { "$ref": "#/entities/VideoMedia" },
+      "description": "Permanent cloud video manifests for feed posts."
+    },
+    "/videoMedia/{mediaId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/VideoMediaChunk" },
+      "description": "Ordered binary chunks of a permanent cloud video."
+    },
+    "/stories/{storyId}": {
+      "schema": { "$ref": "#/entities/Story" },
+      "description": "24-hour photo, video, and text stories visible at the top of the Home Feed."
+    },
+    "/stories/{storyId}/viewers/{viewerId}": {
+      "schema": { "$ref": "#/entities/StoryViewer" },
+      "description": "Real-time list of verified users who viewed a story."
+    },
+    "/stories/{storyId}/reactions/{userId}": {
+      "schema": { "$ref": "#/entities/StoryReaction" },
+      "description": "Real-time user reactions (like, love, haha, wow, sad, angry) on a story."
     }
   }
 }

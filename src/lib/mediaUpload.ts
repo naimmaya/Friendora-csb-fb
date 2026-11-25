@@ -1,4 +1,15 @@
 import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  serverTimestamp,
+  setDoc,
+  where,
+} from 'firebase/firestore';
+import {
   deleteObject,
   getDownloadURL,
   ref,
@@ -6,7 +17,7 @@ import {
   type UploadTask,
 } from 'firebase/storage';
 import {getAuthToken} from './api';
-import {auth, storage} from './firebase';
+import {auth, db, storage} from './firebase';
 import {compressImageForFirestore} from './firestoreStore';
 
 export const MAX_VIDEO_BYTES = 100 * 1024 * 1024; // 100 MB
@@ -566,6 +577,21 @@ export async function deleteFirebaseStorageUrlIfApplicable(
   url: string | null | undefined,
 ): Promise<void> {
   if (!url) return;
+  if (url.startsWith('fsvideo://')) {
+    const mediaId = url.slice('fsvideo://'.length).trim();
+    if (mediaId && /^[a-zA-Z0-9_-]{1,128}$/.test(mediaId)) {
+      try {
+        const chunksSnap = await getDocs(
+          query(collection(db, 'videoMedia', mediaId, 'chunks'), where('mediaId', '==', mediaId)),
+        );
+        await Promise.all(chunksSnap.docs.map((d) => deleteDoc(d.ref).catch(() => {})));
+        await deleteDoc(doc(db, 'videoMedia', mediaId)).catch(() => {});
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+    return;
+  }
   const isFirebaseStorageUrl =
     url.startsWith('https://firebasestorage.googleapis.com/') ||
     url.startsWith('https://storage.googleapis.com/') ||
@@ -576,6 +602,315 @@ export async function deleteFirebaseStorageUrlIfApplicable(
     await deleteObject(fileRef);
   } catch {
     // Object may already be removed or bucket not enabled
+  }
+}
+
+// ==========================================
+// PERMANENT CLOUD VIDEO STORAGE + CACHE
+// ==========================================
+
+const VIDEO_CACHE_DB = 'verve_video_cache_v1';
+const VIDEO_CACHE_STORE = 'videos';
+const FIRESTORE_VIDEO_CHUNK_BYTES = 500 * 1024; // 500 KB raw -> ~667 KB base64 (safely < 750 KB rule cap)
+const FIRESTORE_VIDEO_MAX_BYTES = 50 * 1024 * 1024; // 50 MB max per rules
+
+const memoryVideoObjectUrls = new Map<string, string>();
+const inflightVideoResolves = new Map<string, Promise<string | null>>();
+
+function openVideoCacheDb(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(VIDEO_CACHE_DB, 1);
+      req.onupgradeneeded = () => {
+        const idb = req.result;
+        if (!idb.objectStoreNames.contains(VIDEO_CACHE_STORE)) {
+          idb.createObjectStore(VIDEO_CACHE_STORE);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function cacheVideoBlobLocally(cacheKey: string, blob: Blob): Promise<string> {
+  const existingObjUrl = memoryVideoObjectUrls.get(cacheKey);
+  if (existingObjUrl) return existingObjUrl;
+  const objUrl = URL.createObjectURL(blob);
+  memoryVideoObjectUrls.set(cacheKey, objUrl);
+  try {
+    const idb = await openVideoCacheDb();
+    if (idb) {
+      await new Promise<void>((resolve) => {
+        const tx = idb.transaction(VIDEO_CACHE_STORE, 'readwrite');
+        tx.objectStore(VIDEO_CACHE_STORE).put(blob, cacheKey);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
+    }
+  } catch {
+    // Memory cache still works even if IndexedDB quota is full
+  }
+  return objUrl;
+}
+
+async function readCachedVideoBlob(cacheKey: string): Promise<Blob | null> {
+  try {
+    const idb = await openVideoCacheDb();
+    if (!idb) return null;
+    return await new Promise<Blob | null>((resolve) => {
+      const tx = idb.transaction(VIDEO_CACHE_STORE, 'readonly');
+      const req = tx.objectStore(VIDEO_CACHE_STORE).get(cacheKey);
+      req.onsuccess = () => resolve(req.result instanceof Blob ? req.result : null);
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    const slice = bytes.subarray(i, Math.min(i + step, bytes.length));
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8(base64: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(base64);
+  const len = binary.length;
+  const buffer = new ArrayBuffer(len);
+  const out = new Uint8Array(buffer);
+  for (let i = 0; i < len; i++) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}
+
+async function uploadVideoToFirestoreCloud(
+  blob: Blob,
+  opts: {
+    mediaId: string;
+    mimeType: string;
+    durationSec: number;
+    onProgress?: (percent: number) => void;
+  },
+): Promise<string> {
+  const uid = auth.currentUser?.uid;
+  if (!uid) {
+    throw new Error('Please sign in to upload videos.');
+  }
+  if (blob.size <= 0) {
+    throw new Error('Selected video file is empty.');
+  }
+  if (blob.size > FIRESTORE_VIDEO_MAX_BYTES) {
+    throw new Error('Video must be 50 MB or smaller.');
+  }
+
+  const safeMime = /^video\/[a-zA-Z0-9.+-]+$/.test(opts.mimeType) ? opts.mimeType : 'video/mp4';
+  const totalBytes = blob.size;
+  const totalChunks = Math.ceil(totalBytes / FIRESTORE_VIDEO_CHUNK_BYTES);
+  if (totalChunks > 120) {
+    throw new Error('Video is too large. Please choose a shorter or smaller clip (max 50 MB).');
+  }
+
+  const mediaId = opts.mediaId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 128) || `vid_${Date.now()}`;
+  const safeDuration = Math.max(0, Math.min(3600, Math.round(opts.durationSec || 0)));
+
+  opts.onProgress?.(4);
+
+  // 1. Write manifest doc first so chunk security rules can verify ownership
+  await setDoc(doc(db, 'videoMedia', mediaId), {
+    id: mediaId,
+    authorUid: uid,
+    mimeType: safeMime,
+    totalBytes,
+    totalChunks,
+    durationSec: safeDuration,
+    visibility: 'public',
+    createdAt: serverTimestamp(),
+  });
+
+  // 2. Upload all binary chunks with real 0% - 100% progress
+  const buffer = await blob.arrayBuffer();
+  const fullBytes = new Uint8Array(buffer);
+  let uploadedCount = 0;
+
+  // Upload in small parallel batches of 3 for fast mobile uploads without saturating Firestore
+  const BATCH_SIZE = 3;
+  for (let start = 0; start < totalChunks; start += BATCH_SIZE) {
+    const batchPromises: Promise<void>[] = [];
+    const end = Math.min(totalChunks, start + BATCH_SIZE);
+    for (let idx = start; idx < end; idx++) {
+      const byteStart = idx * FIRESTORE_VIDEO_CHUNK_BYTES;
+      const byteEnd = Math.min(totalBytes, byteStart + FIRESTORE_VIDEO_CHUNK_BYTES);
+      const chunkBytes = fullBytes.subarray(byteStart, byteEnd);
+      const chunkId = `c_${idx}`;
+      const b64 = uint8ToBase64(chunkBytes);
+      batchPromises.push(
+        setDoc(doc(db, 'videoMedia', mediaId, 'chunks', chunkId), {
+          id: chunkId,
+          mediaId,
+          authorUid: uid,
+          index: idx,
+          data: b64,
+          createdAt: serverTimestamp(),
+        }).then(() => {
+          uploadedCount += 1;
+          const pct = Math.min(99, Math.max(6, Math.round((uploadedCount / totalChunks) * 96) + 3));
+          opts.onProgress?.(pct);
+        }),
+      );
+    }
+    await Promise.all(batchPromises);
+  }
+
+  const permanentUrl = `fsvideo://${mediaId}`;
+  await cacheVideoBlobLocally(permanentUrl, blob);
+  opts.onProgress?.(100);
+  return permanentUrl;
+}
+
+/**
+ * Upload a Post video 100% permanently to the cloud:
+ * 1) Primary: Firebase Storage at `posts/{postId}/video.mp4` -> returns real Firebase downloadURL
+ * 2) Permanent Cloud Fallback: Cloud Firestore `videoMedia/{postId}` chunks -> returns `fsvideo://{postId}`
+ *    (never relies on ephemeral local server disk `/uploads/...`, so it works across all devices,
+ *     Shared App URL, and restarts without ever showing "Tap to retry").
+ */
+export async function uploadPostVideoPermanent(
+  file: File | Blob,
+  options: {
+    postId: string;
+    durationSec: number;
+    onProgress?: (percent: number) => void;
+  },
+): Promise<UploadedAttachment> {
+  const {postId, durationSec, onProgress} = options;
+  if (file.size > MAX_VIDEO_BYTES) {
+    throw new Error('Video too large (max 100MB / 60 sec).');
+  }
+
+  const mime = inferMimeType(file, 'video');
+  const rawName = file instanceof File ? file.name : 'video.mp4';
+  const storagePath = `posts/${postId}/video.mp4`;
+  onProgress?.(2);
+
+  // 1. Primary path: Real Firebase Storage upload -> Firebase downloadURL
+  if (Date.now() >= firebaseStorageBackoffUntil) {
+    try {
+      const downloadUrl = await uploadToFirebaseStorageWithStallGuard(
+        file,
+        storagePath,
+        mime,
+        onProgress,
+        6000,
+      );
+      if (downloadUrl && downloadUrl.trim()) {
+        firebaseStorageBackoffUntil = 0;
+        await cacheVideoBlobLocally(downloadUrl.trim(), file);
+        return {
+          url: downloadUrl.trim(),
+          name: rawName.slice(0, 180),
+          size: file.size,
+          storageBacked: true,
+        };
+      }
+    } catch {
+      // Fall through cleanly to permanent Cloud Firestore video storage
+    }
+  }
+
+  // 2. Permanent Cloud Firestore storage (works everywhere including Shared App URL & restarts)
+  const fsVideoUrl = await uploadVideoToFirestoreCloud(file, {
+    mediaId: postId,
+    mimeType: mime,
+    durationSec,
+    onProgress,
+  });
+
+  return {
+    url: fsVideoUrl,
+    name: rawName.slice(0, 180),
+    size: file.size,
+    storageBacked: false,
+  };
+}
+
+/**
+ * Resolve any video URL to a directly playable URL for `<video src={...}>`:
+ * - `https://...` (Firebase Storage downloadURL): returns directly
+ * - `fsvideo://{mediaId}`: loads from local IndexedDB cache or Firestore `videoMedia/{mediaId}/chunks`
+ *   and returns a playable `blob:` URL (cached locally so subsequent plays use 0 Firestore reads).
+ */
+export async function resolveCloudVideoUrl(src: string | null | undefined): Promise<string | null> {
+  if (!src || !src.trim()) return null;
+  const trimmed = src.trim();
+  if (!trimmed.startsWith('fsvideo://')) {
+    return trimmed;
+  }
+
+  const existingMemory = memoryVideoObjectUrls.get(trimmed);
+  if (existingMemory) return existingMemory;
+
+  const existingInflight = inflightVideoResolves.get(trimmed);
+  if (existingInflight) return existingInflight;
+
+  const task = (async (): Promise<string | null> => {
+    // 1. Check local IndexedDB cache first (instant, 0 Firestore reads)
+    const cachedBlob = await readCachedVideoBlob(trimmed);
+    if (cachedBlob && cachedBlob.size > 0) {
+      return await cacheVideoBlobLocally(trimmed, cachedBlob);
+    }
+
+    // 2. Fetch permanent chunks from Cloud Firestore
+    const mediaId = trimmed.slice('fsvideo://'.length).trim();
+    if (!mediaId || !/^[a-zA-Z0-9_-]{1,128}$/.test(mediaId)) return null;
+
+    try {
+      const manifestSnap = await getDoc(doc(db, 'videoMedia', mediaId));
+      if (!manifestSnap.exists()) return null;
+      const manifest = manifestSnap.data();
+      const mimeType =
+        typeof manifest.mimeType === 'string' && manifest.mimeType.startsWith('video/')
+          ? manifest.mimeType
+          : 'video/mp4';
+
+      const chunksSnap = await getDocs(
+        query(collection(db, 'videoMedia', mediaId, 'chunks'), where('mediaId', '==', mediaId)),
+      );
+      if (chunksSnap.empty) return null;
+
+      const ordered = chunksSnap.docs
+        .map((d) => d.data() as {index?: number; data?: string})
+        .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+
+      const parts: BlobPart[] = [];
+      for (const chunk of ordered) {
+        if (typeof chunk.data === 'string' && chunk.data.length > 0) {
+          parts.push(base64ToUint8(chunk.data));
+        }
+      }
+      if (parts.length === 0) return null;
+
+      const assembledBlob = new Blob(parts, {type: mimeType});
+      return await cacheVideoBlobLocally(trimmed, assembledBlob);
+    } catch {
+      return null;
+    }
+  })();
+
+  inflightVideoResolves.set(trimmed, task);
+  try {
+    return await task;
+  } finally {
+    inflightVideoResolves.delete(trimmed);
   }
 }
 

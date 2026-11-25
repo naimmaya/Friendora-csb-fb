@@ -232,14 +232,18 @@ function ParticipantTile({
               className="w-20 h-20 sm:w-24 sm:h-24 ring-2 ring-[#0B0F17]"
             />
           </div>
-          {muted && (
-            <span
-              title="Muted"
-              className="absolute -bottom-1 -right-1 w-7 h-7 rounded-full bg-red-500 text-white flex items-center justify-center ring-2 ring-[#151B28] shadow-md"
-            >
-              <MicOff className="w-3.5 h-3.5" />
-            </span>
-          )}
+          <span
+            title={muted ? 'Mic Off' : 'Mic On'}
+            className={`absolute -bottom-1 -right-1 w-7 h-7 rounded-full text-white flex items-center justify-center ring-2 ring-[#151B28] shadow-md transition-colors ${
+              muted
+                ? 'bg-red-500'
+                : isSpeaking
+                  ? 'bg-emerald-500'
+                  : 'bg-[#1F2937]'
+            }`}
+          >
+            {muted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+          </span>
         </div>
 
         <p className="text-sm sm:text-base font-bold text-white truncate max-w-full px-2">
@@ -270,9 +274,9 @@ function ParticipantTile({
   // VIDEO GROUP CALL TILE: Video Grid + Profile Photo Fallback when Camera is Off
   return (
     <div
-      className={`relative w-full h-full min-h-[130px] rounded-2xl overflow-hidden bg-[#151B28] border-2 transition-all duration-200 flex flex-col items-center justify-center ${
-        isSpeaking
-          ? 'border-emerald-400 shadow-[0_0_24px_rgba(52,211,153,0.3)]'
+      className={`relative w-full h-full min-h-[100px] rounded-2xl overflow-hidden bg-[#151B28] border-2 transition-all duration-200 flex flex-col items-center justify-center ${
+        isSpeaking && !muted
+          ? 'border-emerald-400 ring-2 ring-emerald-400/70 shadow-[0_0_28px_rgba(52,211,153,0.45)]'
           : 'border-white/10'
       }`}
     >
@@ -325,11 +329,18 @@ function ParticipantTile({
             {isLocal ? ' (You)' : ''}
           </span>
         </span>
-        {muted && (
-          <span className="w-6 h-6 rounded-full bg-red-500/90 text-white flex items-center justify-center shrink-0">
-            <MicOff className="w-3.5 h-3.5" />
-          </span>
-        )}
+        <span
+          title={muted ? 'Mic Off' : 'Mic On'}
+          className={`w-6 h-6 rounded-full text-white flex items-center justify-center shrink-0 transition-colors ${
+            muted
+              ? 'bg-red-500/95'
+              : isSpeaking
+                ? 'bg-emerald-500/95 shadow-[0_0_10px_rgba(52,211,153,0.75)]'
+                : 'bg-black/60 backdrop-blur-xs'
+          }`}
+        >
+          {muted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+        </span>
       </div>
     </div>
   );
@@ -860,7 +871,7 @@ export function GroupCallOverlay({
         <div className="text-center space-y-2">
           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/10 border border-white/10 text-xs font-semibold uppercase tracking-wider text-[#60A5FA]">
             <Users className="w-3.5 h-3.5" />
-            <span>Incoming Group {isVideo ? 'Video' : 'Audio'} Call</span>
+            <span>Group {isVideo ? 'Video' : 'Audio'} Call</span>
           </span>
           <h2 className="text-2xl sm:text-3xl font-display font-bold mt-2">{liveCall.groupName}</h2>
           <p className="text-sm text-white/75">
@@ -893,12 +904,12 @@ export function GroupCallOverlay({
             <button
               type="button"
               onClick={() => onAcceptIncoming(liveCall)}
-              aria-label="Join group call"
+              aria-label="Accept group call"
               className="w-16 h-16 rounded-full bg-[#22C55E] hover:bg-[#16A34A] text-white flex items-center justify-center shadow-lg shadow-green-600/35 animate-pulse active:scale-95 transition-transform cursor-pointer"
             >
               {isVideo ? <Video className="w-7 h-7" /> : <Phone className="w-7 h-7" />}
             </button>
-            <span className="text-xs font-semibold text-white/85">Join Call</span>
+            <span className="text-xs font-semibold text-white/85">Accept</span>
           </div>
         </div>
       </div>
@@ -906,7 +917,8 @@ export function GroupCallOverlay({
   }
 
   // ============================================
-  // ACTIVE GROUP CALL — RESPONSIVE MESSENGER GRID (UP TO 40 MEMBERS)
+  // ACTIVE GROUP CALL — RESPONSIVE MESSENGER GRID (UP TO 12 MEMBERS)
+  // 1 = full, 2 = split, 3-4 = 2x2, 5-6 = 2x3/3x2, 7-9 = 3x3, 10-12 = 3x4 Grid
   // ============================================
   const count = participants.length;
   const gridClass =
@@ -918,9 +930,9 @@ export function GroupCallOverlay({
           ? 'grid-cols-2 grid-rows-2'
           : count <= 6
             ? 'grid-cols-2 sm:grid-cols-3 grid-rows-3 sm:grid-rows-2'
-            : count <= 12
-              ? 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 auto-rows-[minmax(150px,1fr)]'
-              : 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 auto-rows-[minmax(130px,1fr)]';
+            : count <= 9
+              ? 'grid-cols-3 grid-rows-3'
+              : 'grid-cols-3 grid-rows-4 sm:grid-cols-4 sm:grid-rows-3';
 
   return (
     <div className="fixed inset-0 z-[140] bg-[#0B0F17] text-white flex flex-col select-none">
@@ -1012,9 +1024,9 @@ export function GroupCallOverlay({
         ))}
       </div>
 
-      {/* Bottom Messenger Controls: [Mute] [Video On/Off] [Speaker] [Leave Call - Red] */}
-      <div className="px-4 py-4 sm:py-5 border-t border-white/10 bg-[#10141E] shrink-0">
-        <div className="max-w-md mx-auto flex items-center justify-around gap-3">
+      {/* Bottom Messenger Controls: [Mute] [Camera Off] [Speaker] [Switch Camera] [End Call - Red] */}
+      <div className="px-3 sm:px-4 py-4 sm:py-5 border-t border-white/10 bg-[#10141E] shrink-0">
+        <div className="max-w-lg mx-auto flex items-center justify-around gap-1.5 sm:gap-3">
           {/* Mute */}
           <button
             type="button"
@@ -1023,7 +1035,7 @@ export function GroupCallOverlay({
             className="flex flex-col items-center gap-1.5 cursor-pointer"
           >
             <span
-              className={`w-12 h-12 sm:w-14 sm:h-14 rounded-full flex items-center justify-center transition-colors ${
+              className={`w-11 h-11 sm:w-14 sm:h-14 rounded-full flex items-center justify-center transition-colors ${
                 isMuted ? 'bg-white text-[#0F172A]' : 'bg-white/15 hover:bg-white/25 text-white'
               }`}
             >
@@ -1034,23 +1046,23 @@ export function GroupCallOverlay({
             </span>
           </button>
 
-          {/* Video On/Off */}
+          {/* Camera Off / On */}
           {isVideo && (
             <button
               type="button"
               onClick={handleToggleCamera}
-              aria-label={cameraOff ? 'Turn video on' : 'Turn video off'}
+              aria-label={cameraOff ? 'Turn camera on' : 'Turn camera off'}
               className="flex flex-col items-center gap-1.5 cursor-pointer"
             >
               <span
-                className={`w-12 h-12 sm:w-14 sm:h-14 rounded-full flex items-center justify-center transition-colors ${
+                className={`w-11 h-11 sm:w-14 sm:h-14 rounded-full flex items-center justify-center transition-colors ${
                   cameraOff ? 'bg-white text-[#0F172A]' : 'bg-white/15 hover:bg-white/25 text-white'
                 }`}
               >
                 {cameraOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
               </span>
               <span className="text-[11px] font-medium text-white/80">
-                {cameraOff ? 'Video Off' : 'Video On'}
+                {cameraOff ? 'Camera On' : 'Camera Off'}
               </span>
             </button>
           )}
@@ -1063,7 +1075,7 @@ export function GroupCallOverlay({
             className="flex flex-col items-center gap-1.5 cursor-pointer"
           >
             <span
-              className={`w-12 h-12 sm:w-14 sm:h-14 rounded-full flex items-center justify-center transition-colors ${
+              className={`w-11 h-11 sm:w-14 sm:h-14 rounded-full flex items-center justify-center transition-colors ${
                 speakerOn ? 'bg-white text-[#0F172A]' : 'bg-white/15 hover:bg-white/25 text-white'
               }`}
             >
@@ -1072,17 +1084,34 @@ export function GroupCallOverlay({
             <span className="text-[11px] font-medium text-white/80">Speaker</span>
           </button>
 
-          {/* Leave Call (Red) */}
+          {/* Switch Camera (Front / Back) */}
+          {isVideo && (
+            <button
+              type="button"
+              onClick={handleSwitchCamera}
+              disabled={switchingCamera || cameraOff}
+              aria-label="Switch Camera"
+              title="Switch Camera"
+              className="flex flex-col items-center gap-1.5 disabled:opacity-40 cursor-pointer"
+            >
+              <span className="w-11 h-11 sm:w-14 sm:h-14 rounded-full bg-white/15 hover:bg-white/25 text-white flex items-center justify-center transition-colors">
+                <RefreshCw className={`w-5 h-5 ${switchingCamera ? 'animate-spin' : ''}`} />
+              </span>
+              <span className="text-[11px] font-medium text-white/80">Switch</span>
+            </button>
+          )}
+
+          {/* End Call (Red) */}
           <button
             type="button"
             onClick={handleLeaveCall}
-            aria-label="Leave group call"
+            aria-label="End group call"
             className="flex flex-col items-center gap-1.5 cursor-pointer"
           >
-            <span className="w-14 h-12 sm:w-14 sm:h-14 rounded-full bg-[#EF4444] hover:bg-[#DC2626] text-white flex items-center justify-center shadow-lg shadow-red-600/35 active:scale-95 transition-transform">
-              <PhoneOff className="w-6 h-6" />
+            <span className="w-12 h-11 sm:w-14 sm:h-14 rounded-full bg-[#EF4444] hover:bg-[#DC2626] text-white flex items-center justify-center shadow-lg shadow-red-600/35 active:scale-95 transition-transform">
+              <PhoneOff className="w-5 h-5 sm:w-6 sm:h-6" />
             </span>
-            <span className="text-[11px] font-semibold text-red-300">Leave Call</span>
+            <span className="text-[11px] font-semibold text-red-300">End Call</span>
           </button>
         </div>
       </div>
